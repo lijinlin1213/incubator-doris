@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -31,12 +33,12 @@
 #include "util/runtime_profile.h"
 #include "util/debug_util.h"
 
-namespace palo {
+namespace doris {
 
 // mock
 class SchemaScanNodeTest : public testing::Test {
 public:
-    SchemaScanNodeTest() : _runtim_state("test") {
+    SchemaScanNodeTest() : runtime_state("test") {
         TDescriptorTable t_desc_table;
 
         // table descriptors
@@ -80,7 +82,7 @@ public:
 
         DescriptorTbl::create(&_obj_pool, t_desc_table, &_desc_tbl);
 
-        _runtim_state.set_desc_tbl(_desc_tbl);
+        runtime_state.set_desc_tbl(_desc_tbl);
 
         // Node Id
         _tnode.node_id = 0;
@@ -104,14 +106,14 @@ private:
     TPlanNode _tnode;
     ObjectPool _obj_pool;
     DescriptorTbl* _desc_tbl;
-    RuntimeState _runtim_state;
+    RuntimeState runtime_state;
 };
 
 TEST_F(SchemaScanNodeTest, normal_use) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
-    Status status = scan_node.prepare(&_runtim_state);
+    Status status = scan_node.prepare(&runtime_state);
     ASSERT_TRUE(status.ok());
-    status = scan_node.prepare(&_runtim_state);
+    status = scan_node.prepare(&runtime_state);
     ASSERT_TRUE(status.ok());
     std::vector<TScanRangeParams> scan_ranges;
     status = scan_node.set_scan_ranges(scan_ranges);
@@ -120,13 +122,13 @@ TEST_F(SchemaScanNodeTest, normal_use) {
     scan_node.debug_string(1, &out);
     LOG(WARNING) << out.str();
 
-    status = scan_node.open(&_runtim_state);
+    status = scan_node.open(&runtime_state);
     ASSERT_TRUE(status.ok());
     RowBatch row_batch(scan_node._row_descriptor, 100);
     bool eos = false;
 
     while (!eos) {
-        status = scan_node.get_next(&_runtim_state, &row_batch, &eos);
+        status = scan_node.get_next(&runtime_state, &row_batch, &eos);
         ASSERT_TRUE(status.ok());
 
         if (!eos) {
@@ -137,21 +139,21 @@ TEST_F(SchemaScanNodeTest, normal_use) {
         }
     }
 
-    status = scan_node.close(&_runtim_state);
+    status = scan_node.close(&runtime_state);
     ASSERT_TRUE(status.ok());
 }
 TEST_F(SchemaScanNodeTest, Prepare_fail_1) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     TableDescriptor* old = _desc_tbl->_tuple_desc_map[(TupleId)0]->_table_desc;
     _desc_tbl->_tuple_desc_map[(TupleId)0]->_table_desc = NULL;
-    Status status = scan_node.prepare(&_runtim_state);
+    Status status = scan_node.prepare(&runtime_state);
     ASSERT_FALSE(status.ok());
     _desc_tbl->_tuple_desc_map[(TupleId)0]->_table_desc = old;
 }
 TEST_F(SchemaScanNodeTest, Prepare_fail_2) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     scan_node._tuple_id = 1;
-    Status status = scan_node.prepare(&_runtim_state);
+    Status status = scan_node.prepare(&runtime_state);
     ASSERT_FALSE(status.ok());
 }
 TEST_F(SchemaScanNodeTest, dummy) {
@@ -159,9 +161,9 @@ TEST_F(SchemaScanNodeTest, dummy) {
                                     _desc_tbl->_tuple_desc_map[(TupleId)0]->_table_desc;
     t_desc->_schema_table_type = TSchemaTableType::SCH_EVENTS;
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
-    Status status = scan_node.prepare(&_runtim_state);
+    Status status = scan_node.prepare(&runtime_state);
     ASSERT_TRUE(status.ok());
-    status = scan_node.prepare(&_runtim_state);
+    status = scan_node.prepare(&runtime_state);
     ASSERT_TRUE(status.ok());
     std::vector<TScanRangeParams> scan_ranges;
     status = scan_node.set_scan_ranges(scan_ranges);
@@ -170,13 +172,13 @@ TEST_F(SchemaScanNodeTest, dummy) {
     scan_node.debug_string(1, &out);
     LOG(WARNING) << out.str();
 
-    status = scan_node.open(&_runtim_state);
+    status = scan_node.open(&runtime_state);
     ASSERT_TRUE(status.ok());
     RowBatch row_batch(scan_node._row_descriptor, 100);
     bool eos = false;
 
     while (!eos) {
-        status = scan_node.get_next(&_runtim_state, &row_batch, &eos);
+        status = scan_node.get_next(&runtime_state, &row_batch, &eos);
         ASSERT_TRUE(status.ok());
 
         if (!eos) {
@@ -187,25 +189,25 @@ TEST_F(SchemaScanNodeTest, dummy) {
         }
     }
 
-    status = scan_node.close(&_runtim_state);
+    status = scan_node.close(&runtime_state);
     ASSERT_TRUE(status.ok());
     t_desc->_schema_table_type = TSchemaTableType::SCH_AUTHORS;
 }
 TEST_F(SchemaScanNodeTest, get_dest_desc_fail) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     scan_node._tuple_id = 1;
-    Status status = scan_node.prepare(&_runtim_state);
+    Status status = scan_node.prepare(&runtime_state);
     ASSERT_FALSE(status.ok());
 }
 TEST_F(SchemaScanNodeTest, invalid_param) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     Status status = scan_node.prepare(NULL);
     ASSERT_FALSE(status.ok());
-    status = scan_node.prepare(&_runtim_state);
+    status = scan_node.prepare(&runtime_state);
     ASSERT_TRUE(status.ok());
     status = scan_node.open(NULL);
     ASSERT_FALSE(status.ok());
-    status = scan_node.open(&_runtim_state);
+    status = scan_node.open(&runtime_state);
     ASSERT_TRUE(status.ok());
     RowBatch row_batch(scan_node._row_descriptor, 100);
     bool eos;
@@ -215,21 +217,21 @@ TEST_F(SchemaScanNodeTest, invalid_param) {
 
 TEST_F(SchemaScanNodeTest, no_init) {
     SchemaScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
-    //Status status = scan_node.prepare(&_runtim_state);
+    //Status status = scan_node.prepare(&runtime_state);
     //ASSERT_TRUE(status.ok());
-    Status status = scan_node.open(&_runtim_state);
+    Status status = scan_node.open(&runtime_state);
     ASSERT_FALSE(status.ok());
     RowBatch row_batch(scan_node._row_descriptor, 100);
     bool eos;
-    status = scan_node.get_next(&_runtim_state, &row_batch, &eos);
+    status = scan_node.get_next(&runtime_state, &row_batch, &eos);
     ASSERT_FALSE(status.ok());
 }
 
 }
 
 int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("PALO_HOME")) + "/conf/be.conf";
-    if (!palo::config::init(conffile.c_str(), false)) {
+    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
+    if (!doris::config::init(conffile.c_str(), false)) {
         fprintf(stderr, "error read config file. \n");
         return -1;
     }

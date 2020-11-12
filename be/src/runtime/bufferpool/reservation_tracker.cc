@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -32,7 +29,7 @@
 #include "common/names.h"
 #include "olap/utils.h"
 
-namespace palo {
+namespace doris {
 
 ReservationTracker::ReservationTracker() {}
 
@@ -78,10 +75,10 @@ void ReservationTracker::InitChildTracker(RuntimeProfile* profile,
     MemTracker* parent_mem_tracker = GetParentMemTracker();
     if (parent_mem_tracker != nullptr) {
       // Make sure the parent links of the MemTrackers correspond to our parent links.
-      DCHECK_EQ(parent_mem_tracker, mem_tracker_->parent());
+      DCHECK_EQ(parent_mem_tracker, mem_tracker_->parent().get());
       // Make sure we don't have a lower limit than the ancestor, since we don't enforce
       // limits at lower links.
-      DCHECK_EQ(mem_tracker_->lowest_limit(), parent_mem_tracker->lowest_limit());
+      DCHECK_EQ(mem_tracker_->GetLowestLimit(MemLimit::HARD), parent_mem_tracker->GetLowestLimit(MemLimit::HARD));
     } else {
       // Make sure we didn't leave a gap in the links. E.g. this tracker's grandparent
       // shouldn't have a MemTracker.
@@ -117,7 +114,7 @@ void ReservationTracker::InitCounters(
     counters_.reservation_limit = ADD_COUNTER(profile, "ReservationLimit", TUnit::BYTES);
     COUNTER_SET(counters_.reservation_limit, reservation_limit);
   }
-  if (mem_tracker_ != nullptr) mem_tracker_->enable_reservation_reporting(counters_);
+  if (mem_tracker_ != nullptr) mem_tracker_->EnableReservationReporting(counters_);
 }
 
 void ReservationTracker::Close() {
@@ -194,12 +191,12 @@ bool ReservationTracker::TryConsumeFromMemTracker(int64_t reservation_increase) 
   if (GetParentMemTracker() == nullptr) {
     // At the topmost link, which may be a MemTracker with a limit, we need to use
     // TryConsume() to check the limit.
-    return mem_tracker_->try_consume(reservation_increase);
+    return mem_tracker_->TryConsume(reservation_increase);
   } else {
     // For lower links, there shouldn't be a limit to enforce, so we just need to
     // update the consumption of the linked MemTracker since the reservation is
     // already reflected in its parent.
-    mem_tracker_->consume_local(reservation_increase, GetParentMemTracker());
+    mem_tracker_->ConsumeLocal(reservation_increase, GetParentMemTracker());
     return true;
   }
 }
@@ -208,9 +205,9 @@ void ReservationTracker::ReleaseToMemTracker(int64_t reservation_decrease) {
   DCHECK_GE(reservation_decrease, 0);
   if (mem_tracker_ == nullptr) return;
   if (GetParentMemTracker() == nullptr) {
-    mem_tracker_->release(reservation_decrease);
+    mem_tracker_->Release(reservation_decrease);
   } else {
-    mem_tracker_->release_local(reservation_decrease, GetParentMemTracker());
+    mem_tracker_->ReleaseLocal(reservation_decrease, GetParentMemTracker());
   }
 }
 
@@ -290,14 +287,12 @@ bool ReservationTracker::TransferReservationTo(ReservationTracker* other, int64_
     bool success = tracker->TryConsumeFromMemTracker(bytes);
     DCHECK(success);
     if (tracker != other_path_to_common[0]) tracker->child_reservations_ += bytes;
-    tracker->DebugString();
   }
   
   for (ReservationTracker* tracker : path_to_common) {
     if (tracker != path_to_common[0]) tracker->child_reservations_ -= bytes;
     tracker->UpdateReservation(-bytes);
     tracker->ReleaseToMemTracker(bytes);
-    tracker->DebugString();
   }
 
   // Update the 'child_reservations_' on the common ancestor if needed.
@@ -305,14 +300,12 @@ bool ReservationTracker::TransferReservationTo(ReservationTracker* other, int64_
   if (common_ancestor == other) {
     lock_guard<SpinLock> l(other->lock_);
     other->child_reservations_ -= bytes;
-    other->DebugString();
     other->CheckConsistency();
   }
   // Case 2: reservation was pushed down below 'this'.
   if (common_ancestor == this) {
     lock_guard<SpinLock> l(lock_);
     child_reservations_ += bytes;
-    DebugString();
     CheckConsistency();
   }
   return true;

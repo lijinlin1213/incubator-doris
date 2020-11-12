@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_DATA_STREAM_SENDER_H
-#define BDG_PALO_BE_RUNTIME_DATA_STREAM_SENDER_H
+#ifndef DORIS_BE_RUNTIME_DATA_STREAM_SENDER_H
+#define DORIS_BE_RUNTIME_DATA_STREAM_SENDER_H
 
 #include <vector>
 #include <string>
@@ -31,7 +28,7 @@
 #include "util/runtime_profile.h"
 #include "gen_cpp/data.pb.h"  // for PRowBatch
 
-namespace palo {
+namespace doris {
 
 class ExprContext;
 class RowBatch;
@@ -62,7 +59,7 @@ public:
     DataStreamSender(ObjectPool* pool, int sender_id,
                      const RowDescriptor& row_desc, const TDataStreamSink& sink,
                      const std::vector<TPlanFragmentDestination>& destinations,
-                     int per_channel_buffer_size);
+                     int per_channel_buffer_size, bool send_query_statistics_with_every_batch);
     virtual ~DataStreamSender();
 
     virtual Status init(const TDataSink& thrift_sink);
@@ -150,15 +147,11 @@ private:
 
     RuntimeProfile* _profile; // Allocated from _pool
     RuntimeProfile::Counter* _serialize_batch_timer;
-    RuntimeProfile::Counter* _thrift_transmit_timer;
     RuntimeProfile::Counter* _bytes_sent_counter;
     RuntimeProfile::Counter* _uncompressed_bytes_counter;
     RuntimeProfile::Counter* _ignore_rows;
 
-    std::unique_ptr<MemTracker> _mem_tracker;
-
-    // Throughput per time spent in TransmitData
-    RuntimeProfile::Counter* _network_throughput;
+    std::shared_ptr<MemTracker> _mem_tracker;
 
     // Throughput per total time spent in sender
     RuntimeProfile::Counter* _overall_throughput;

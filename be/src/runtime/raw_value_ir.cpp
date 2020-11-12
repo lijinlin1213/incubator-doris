@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,7 +18,7 @@
 #include "runtime/raw_value.h"
 #include "util/types.h"
 
-namespace palo {
+namespace doris {
 
 int RawValue::compare(const void* v1, const void* v2, const TypeDescriptor& type) {
     const StringValue* string_value1;
@@ -101,6 +98,13 @@ int RawValue::compare(const void* v1, const void* v2, const TypeDescriptor& type
         decimal_value2 = reinterpret_cast<const DecimalValue*>(v2);
         return (*decimal_value1 > *decimal_value2)
                 ? 1 : (*decimal_value1 < *decimal_value2 ? -1 : 0);
+
+    case TYPE_DECIMALV2: {
+        DecimalV2Value decimal_value1(reinterpret_cast<const PackedInt128*>(v1)->value);
+        DecimalV2Value decimal_value2(reinterpret_cast<const PackedInt128*>(v2)->value);
+        return (decimal_value1 > decimal_value2)
+                ? 1 : (decimal_value1 < decimal_value2 ? -1 : 0);
+    }
 
     case TYPE_LARGEINT: {
         __int128 large_int_value1 = reinterpret_cast<const PackedInt128*>(v1)->value;

@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -39,7 +36,7 @@
 //    "scratch files. This is multiplied by the number of active scratch directories to "
 //    "obtain the target number of scratch write I/Os per query.");
 
-namespace palo {
+namespace doris {
 
 constexpr int BufferPool::LOG_MAX_BUFFER_BYTES;
 constexpr int64_t BufferPool::MAX_BUFFER_BYTES;
@@ -107,7 +104,7 @@ Status BufferPool::PageHandle::GetBuffer(const BufferHandle** buffer) const {
   DCHECK(!page_->pin_in_flight);
   *buffer = &page_->buffer;
   DCHECK((*buffer)->is_open());
-  return Status::OK;
+  return Status::OK();
 }
 
 BufferPool::BufferPool(int64_t min_buffer_len, int64_t buffer_bytes_limit,
@@ -121,15 +118,15 @@ BufferPool::BufferPool(int64_t min_buffer_len, int64_t buffer_bytes_limit,
 
 BufferPool::~BufferPool() {}
 
-Status BufferPool::RegisterClient(const string& name, //TmpFileMgr::FileGroup* file_group,
-    ReservationTracker* parent_reservation, MemTracker* mem_tracker,
+Status BufferPool::RegisterClient(const string& name,
+    ReservationTracker* parent_reservation, const std::shared_ptr<MemTracker>& mem_tracker,
     int64_t reservation_limit, RuntimeProfile* profile, ClientHandle* client) {
   DCHECK(!client->is_registered());
   DCHECK(parent_reservation != NULL);
   client->impl_ = new Client(this, //file_group, 
           name, parent_reservation, mem_tracker,
       reservation_limit, profile);
-  return Status::OK;
+  return Status::OK();
 }
 
 void BufferPool::DeregisterClient(ClientHandle* client) {
@@ -151,7 +148,7 @@ Status BufferPool::CreatePage(
   Page* page = client->impl_->CreatePinnedPage(move(new_buffer));
   handle->Open(page, client);
   if (buffer != nullptr) *buffer = &page->buffer;
-  return Status::OK;
+  return Status::OK();
 }
 
 void BufferPool::DestroyPage(ClientHandle* client, PageHandle* handle) {
@@ -188,7 +185,7 @@ Status BufferPool::Pin(ClientHandle* client, PageHandle* handle) {
   // Update accounting last to avoid complicating the error return path above.
   ++page->pin_count;
   client->impl_->reservation()->AllocateFrom(page->len);
-  return Status::OK;
+  return Status::OK();
 }
 
 void BufferPool::Unpin(ClientHandle* client, PageHandle* handle) {
@@ -228,7 +225,7 @@ Status BufferPool::ExtractBuffer(
   // Destroy the page and extract the buffer.
   client->impl_->DestroyPageInternal(page_handle, buffer_handle);
   DCHECK(buffer_handle->is_open());
-  return Status::OK;
+  return Status::OK();
 }
 
 Status BufferPool::AllocateBuffer(
@@ -262,7 +259,7 @@ Status BufferPool::TransferBuffer(ClientHandle* src_client, BufferHandle* src,
   src_client->impl_->reservation()->ReleaseTo(src->len());
   *dst = std::move(*src);
   dst->client_ = dst_client;
-  return Status::OK;
+  return Status::OK();
 }
 
 void BufferPool::Maintenance() {
@@ -378,7 +375,7 @@ void BufferPool::SubReservation::Close() {
 }
 
 BufferPool::Client::Client(BufferPool* pool, //TmpFileMgr::FileGroup* file_group,
-    const string& name, ReservationTracker* parent_reservation, MemTracker* mem_tracker,
+    const string& name, ReservationTracker* parent_reservation, const std::shared_ptr<MemTracker>& mem_tracker,
     int64_t reservation_limit, RuntimeProfile* profile)
   : pool_(pool),
     //file_group_(file_group),
@@ -389,18 +386,12 @@ BufferPool::Client::Client(BufferPool* pool, //TmpFileMgr::FileGroup* file_group
   // Set up a child profile with buffer pool info.
   RuntimeProfile* child_profile = profile->create_child("Buffer pool", true, true);
   reservation_.InitChildTracker(
-      child_profile, parent_reservation, mem_tracker, reservation_limit);
+      child_profile, parent_reservation, mem_tracker.get(), reservation_limit);
   counters_.alloc_time = ADD_TIMER(child_profile, "AllocTime");
   counters_.cumulative_allocations =
       ADD_COUNTER(child_profile, "CumulativeAllocations", TUnit::UNIT);
   counters_.cumulative_bytes_alloced =
       ADD_COUNTER(child_profile, "CumulativeAllocationBytes", TUnit::BYTES);
-  counters_.read_wait_time = ADD_TIMER(child_profile, "ReadIoWaitTime");
-  counters_.read_io_ops = ADD_COUNTER(child_profile, "ReadIoOps", TUnit::UNIT);
-  counters_.bytes_read = ADD_COUNTER(child_profile, "ReadIoBytes", TUnit::BYTES);
-  counters_.write_wait_time = ADD_TIMER(child_profile, "WriteIoWaitTime");
-  counters_.write_io_ops = ADD_COUNTER(child_profile, "WriteIoOps", TUnit::UNIT);
-  counters_.bytes_written = ADD_COUNTER(child_profile, "WriteIoBytes", TUnit::BYTES);
   counters_.peak_unpinned_bytes =
       child_profile->AddHighWaterMarkCounter("PeakUnpinnedBytes", TUnit::BYTES);
 }
@@ -481,10 +472,10 @@ Status BufferPool::Client::StartMoveToPinned(ClientHandle* client, Page* page) {
   if (dirty_unpinned_pages_.remove(page)) {
     // No writes were initiated for the page - just move it back to the pinned state.
     pinned_pages_.enqueue(page);
-    return Status::OK;
+    return Status::OK();
   }
 
-  return Status("start move to pinned error, page is not in dirty.");
+  return Status::InternalError("start move to pinned error, page is not in dirty.");
 /*
   if (in_flight_write_pages_.contains(page)) {
     // A write is in flight. If so, wait for it to complete - then we only have to
@@ -526,7 +517,7 @@ Status BufferPool::Client::StartMoveEvictedToPinned(
   pinned_pages_.enqueue(page);
   page->pin_in_flight = true;
   DCHECK_CONSISTENCY();
-  return Status::OK;
+  return Status::OK();
 }
 
 void BufferPool::Client::UndoMoveEvictedToPinned(Page* page) {
@@ -558,7 +549,7 @@ Status BufferPool::Client::FinishMoveEvictedToPinned(Page* page) {
       file_group_->WaitForAsyncRead(page->write_handle.get(), page->buffer.mem_range()));
   file_group_->DestroyWriteHandle(move(page->write_handle));
   page->pin_in_flight = false;
-  return Status::OK;
+  return Status::OK();
 }
 */
 Status BufferPool::Client::PrepareToAllocateBuffer(int64_t len) {
@@ -569,7 +560,7 @@ Status BufferPool::Client::PrepareToAllocateBuffer(int64_t len) {
   reservation_.AllocateFrom(len);
   buffers_allocated_bytes_ += len;
   DCHECK_CONSISTENCY();
-  return Status::OK;
+  return Status::OK();
 }
 
 Status BufferPool::Client::DecreaseReservationTo(int64_t target_bytes) {
@@ -578,11 +569,11 @@ Status BufferPool::Client::DecreaseReservationTo(int64_t target_bytes) {
   DCHECK_GE(current_reservation, target_bytes);
   int64_t amount_to_free =
       min(reservation_.GetUnusedReservation(), current_reservation - target_bytes);
-  if (amount_to_free == 0) return Status::OK;
+  if (amount_to_free == 0) return Status::OK();
   // Clean enough pages to allow us to safely release reservation.
   //RETURN_IF_ERROR(CleanPages(&lock, amount_to_free));
   reservation_.DecreaseReservation(amount_to_free);
-  return Status::OK;
+  return Status::OK();
 }
 
 Status BufferPool::Client::CleanPages(unique_lock<mutex>* client_lock, int64_t len) {
@@ -613,7 +604,7 @@ Status BufferPool::Client::CleanPages(unique_lock<mutex>* client_lock, int64_t l
     RETURN_IF_ERROR(write_status_); // Check if error occurred while waiting.
   }
 */
-  return Status::OK;
+  return Status::OK();
 }
 /*
 void BufferPool::Client::WriteDirtyPagesAsync(int64_t min_bytes_to_write) {

@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -17,11 +19,11 @@
 
 #include <arpa/inet.h>
 
-#include <boost/algorithm/string.hpp>
+#include "gutil/strings/split.h"
 
 #include "common/logging.h"
 
-namespace palo {
+namespace doris {
 
 CIDR::CIDR() : _address(0), _netmask(0xffffffff) {
 }
@@ -42,8 +44,7 @@ bool CIDR::reset(const std::string& cidr_str) {
     }
     VLOG(2) << "cidr format str: " << cidr_format_str;
 
-    std::vector<std::string> cidr_items;
-    boost::split(cidr_items, cidr_format_str, boost::is_any_of("/"));
+    std::vector<std::string> cidr_items = strings::Split(cidr_format_str, "/");
     if (cidr_items.size() != 2) {
         LOG(WARNING) << "wrong CIDR format. network=" << cidr_str;
         return false;
@@ -110,4 +111,4 @@ bool CIDR::contains(const std::string& ip) {
     return contains(ip_int);
 }
 
-} // end namespace palo
+} // end namespace doris

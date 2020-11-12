@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -31,11 +28,12 @@
 #include "util/mem_info.h"
 #include "util/network_util.h"
 #include "util/thrift_util.h"
-#include "util/palo_metrics.h"
+#include "util/doris_metrics.h"
 #include "runtime/bufferpool/buffer_pool.h"
 #include "runtime/exec_env.h"
+#include "runtime/memory/chunk_allocator.h"
 #include "runtime/mem_tracker.h"
-#include "runtime/lib_cache.h"
+#include "runtime/user_function_cache.h"
 #include "exprs/operators.h"
 #include "exprs/is_null_predicate.h"
 #include "exprs/like_predicate.h"
@@ -45,96 +43,187 @@
 #include "exprs/cast_functions.h"
 #include "exprs/math_functions.h"
 #include "exprs/encryption_functions.h"
+#include "exprs/es_functions.h"
+#include "exprs/hash_functions.h"
 #include "exprs/timestamp_functions.h"
 #include "exprs/decimal_operators.h"
+#include "exprs/decimalv2_operators.h"
+#include "exprs/time_operators.h"
 #include "exprs/utility_functions.h"
 #include "exprs/json_functions.h"
 #include "exprs/hll_hash_function.h"
-#include "olap/olap_rootpath.h"
+#include "exprs/grouping_sets_functions.h"
+#include "exprs/bitmap_function.h"
+#include "exprs/hll_function.h"
+#include "geo/geo_functions.h"
+#include "olap/options.h"
+#include "util/time.h"
+#include "util/system_metrics.h"
 
-namespace palo {
+namespace doris {
 
-void* tcmalloc_gc_thread(void* dummy) {
-    while (1) {
-        sleep(10);
+bool k_doris_exit = false;
+
+void Daemon::tcmalloc_gc_thread() {
+    while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(10))) {
         size_t used_size = 0;
         size_t free_size = 0;
 
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
         MallocExtension::instance()->GetNumericProperty("generic.current_allocated_bytes", &used_size);
         MallocExtension::instance()->GetNumericProperty("tcmalloc.pageheap_free_bytes", &free_size);
-#endif
         size_t alloc_size = used_size + free_size;
 
         if (alloc_size > config::tc_use_memory_min) {
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
             size_t max_free_size = alloc_size * config::tc_free_memory_rate / 100;
             if (free_size > max_free_size) {
                 MallocExtension::instance()->ReleaseToSystem(free_size - max_free_size);
             }
-#endif
         }
     }
-
-    return NULL;
 }
-    
-void* memory_maintenance_thread(void* dummy) {
-    while (true) {
-        sleep(config::FLAGS_memory_maintenance_sleep_time_s);
+
+void Daemon::memory_maintenance_thread() {
+    while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(config::memory_maintenance_sleep_time_s))) {
         ExecEnv* env = ExecEnv::GetInstance();
         // ExecEnv may not have been created yet or this may be the catalogd or statestored,
         // which don't have ExecEnvs.
         if (env != nullptr) {
             BufferPool* buffer_pool = env->buffer_pool();
             if (buffer_pool != nullptr) buffer_pool->Maintenance();
-            
+
             // The process limit as measured by our trackers may get out of sync with the
             // process usage if memory is allocated or freed without updating a MemTracker.
             // The metric is refreshed whenever memory is consumed or released via a MemTracker,
             // so on a system with queries executing it will be refreshed frequently. However
             // if the system is idle, we need to refresh the tracker occasionally since
             // untracked memory may be allocated or freed, e.g. by background threads.
-            if (env->process_mem_tracker() != nullptr && 
+            if (env->process_mem_tracker() != nullptr &&
                      !env->process_mem_tracker()->is_consumption_metric_null()) {
                 env->process_mem_tracker()->RefreshConsumptionFromMetric();
-            }   
-        }   
-    }   
-    
-    return NULL;
+            }
+        }
+    }
 }
 
-static void init_palo_metrics() {
+/*
+ * this thread will calculate some metrics at a fix interval(15 sec)
+ * 1. push bytes per second
+ * 2. scan bytes per second
+ * 3. max io util of all disks
+ * 4. max network send bytes rate
+ * 5. max network receive bytes rate
+ */
+void Daemon::calculate_metrics_thread() {
+    int64_t last_ts = -1L;
+    int64_t lst_push_bytes = -1;
+    int64_t lst_query_bytes = -1;
+
+    std::map<std::string, int64_t> lst_disks_io_time;
+    std::map<std::string, int64_t> lst_net_send_bytes;
+    std::map<std::string, int64_t> lst_net_receive_bytes;
+
+    do {
+        DorisMetrics::instance()->metric_registry()->trigger_all_hooks(true);
+
+        if (last_ts == -1L) {
+            last_ts = GetCurrentTimeMicros() / 1000;
+            lst_push_bytes = DorisMetrics::instance()->push_request_write_bytes->value();
+            lst_query_bytes = DorisMetrics::instance()->query_scan_bytes->value();
+            DorisMetrics::instance()->system_metrics()->get_disks_io_time(&lst_disks_io_time);
+            DorisMetrics::instance()->system_metrics()->get_network_traffic(&lst_net_send_bytes, &lst_net_receive_bytes);
+        } else {
+            int64_t current_ts = GetCurrentTimeMicros() / 1000;
+            long interval = (current_ts - last_ts) / 1000;
+            last_ts = current_ts;
+
+            // 1. push bytes per second
+            int64_t current_push_bytes = DorisMetrics::instance()->push_request_write_bytes->value();
+            int64_t pps = (current_push_bytes - lst_push_bytes) / (interval + 1);
+            DorisMetrics::instance()->push_request_write_bytes_per_second->set_value(
+                pps < 0 ? 0 : pps);
+            lst_push_bytes = current_push_bytes;
+
+            // 2. query bytes per second
+            int64_t current_query_bytes = DorisMetrics::instance()->query_scan_bytes->value();
+            int64_t qps = (current_query_bytes - lst_query_bytes) / (interval + 1);
+            DorisMetrics::instance()->query_scan_bytes_per_second->set_value(
+                qps < 0 ? 0 : qps);
+            lst_query_bytes = current_query_bytes;
+
+            // 3. max disk io util
+            DorisMetrics::instance()->max_disk_io_util_percent->set_value(
+                DorisMetrics::instance()->system_metrics()->get_max_io_util(lst_disks_io_time, 15));
+            // update lst map
+            DorisMetrics::instance()->system_metrics()->get_disks_io_time(&lst_disks_io_time);
+
+            // 4. max network traffic
+            int64_t max_send = 0;
+            int64_t max_receive = 0;
+            DorisMetrics::instance()->system_metrics()->get_max_net_traffic(
+                lst_net_send_bytes, lst_net_receive_bytes, 15, &max_send, &max_receive);
+            DorisMetrics::instance()->max_network_send_bytes_rate->set_value(max_send);
+            DorisMetrics::instance()->max_network_receive_bytes_rate->set_value(max_receive);
+            // update lst map
+            DorisMetrics::instance()->system_metrics()->get_network_traffic(&lst_net_send_bytes, &lst_net_receive_bytes);
+        }
+    } while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(15)));
+}
+
+static void init_doris_metrics(const std::vector<StorePath>& store_paths) {
     bool init_system_metrics = config::enable_system_metrics;
     std::set<std::string> disk_devices;
     std::vector<std::string> network_interfaces;
+    std::vector<std::string> paths;
+    for (auto& store_path : store_paths) {
+        paths.emplace_back(store_path.path);
+    }
     if (init_system_metrics) {
-        std::vector<std::string> paths;
-        std::vector<int64_t> capacities;
-        auto res = OLAPRootPath::parse_root_paths_from_string(
-            config::storage_root_path.c_str(), &paths, &capacities);
-        if (res != OLAP_SUCCESS) {
-            LOG(WARNING) << "parse storage_root_path failed, res=" << res
-                << ", path=" << config::storage_root_path;
-            return;
-        }
         auto st = DiskInfo::get_disk_devices(paths, &disk_devices);
         if (!st.ok()) {
-            LOG(WARNING) << "get disk devices failed, stauts=" << st.get_error_msg();
+            LOG(WARNING) << "get disk devices failed, status=" << st.get_error_msg();
             return;
         }
         st = get_inet_interfaces(&network_interfaces);
         if (!st.ok()) {
-            LOG(WARNING) << "get inet interfaces failed, stauts=" << st.get_error_msg();
+            LOG(WARNING) << "get inet interfaces failed, status=" << st.get_error_msg();
             return;
         }
     }
-    PaloMetrics::instance()->initialize(
-        "palo_be", init_system_metrics, disk_devices, network_interfaces);
+    DorisMetrics::instance()->initialize(
+        init_system_metrics, disk_devices, network_interfaces);
 }
 
-void init_daemon(int argc, char** argv) {
+void sigterm_handler(int signo) {
+    k_doris_exit = true;
+}
+
+int install_signal(int signo, void(*handler)(int)) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(struct sigaction));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    auto ret = sigaction(signo, &sa, nullptr);
+    if (ret != 0) {
+        char buf[64];
+        LOG(ERROR) << "install signal failed, signo=" << signo
+            << ", errno=" << errno
+            << ", errmsg=" << strerror_r(errno, buf, sizeof(buf));
+    }
+    return ret;
+}
+
+void init_signals() {
+    auto ret = install_signal(SIGINT, sigterm_handler);
+    if (ret < 0) {
+        exit(-1);
+    }
+    ret = install_signal(SIGTERM, sigterm_handler);
+    if (ret < 0) {
+        exit(-1);
+    }
+}
+
+void Daemon::init(int argc, char** argv, const std::vector<StorePath>& paths) {
     // google::SetVersionString(get_build_version(false));
     // google::ParseCommandLineFlags(&argc, &argv, true);
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -146,7 +235,7 @@ void init_daemon(int argc, char** argv) {
     CpuInfo::init();
     DiskInfo::init();
     MemInfo::init();
-    LibCache::init();
+    UserFunctionCache::instance()->init(config::user_function_dir);
     Operators::init();
     IsNullPredicate::init();
     LikePredicate::init();
@@ -157,21 +246,62 @@ void init_daemon(int argc, char** argv) {
     EncryptionFunctions::init();
     TimestampFunctions::init();
     DecimalOperators::init();
+    DecimalV2Operators::init();
+    TimeOperators::init();
     UtilityFunctions::init();
     CompoundPredicate::init();
     JsonFunctions::init();
     HllHashFunctions::init();
+    ESFunctions::init();
+    GeoFunctions::init();
+    GroupingSetsFunctions::init();
+    BitmapFunctions::init();
+    HllFunctions::init();
+    HashFunctions::init();
 
-    pthread_t tc_malloc_pid;
-    pthread_create(&tc_malloc_pid, NULL, tcmalloc_gc_thread, NULL);
-
-    pthread_t buffer_pool_pid;
-    pthread_create(&buffer_pool_pid, NULL, memory_maintenance_thread, NULL);
-    
     LOG(INFO) << CpuInfo::debug_string();
     LOG(INFO) << DiskInfo::debug_string();
     LOG(INFO) << MemInfo::debug_string();
-    init_palo_metrics();
+
+    init_doris_metrics(paths);
+    init_signals();
+
+    ChunkAllocator::init_instance(config::chunk_reserved_bytes_limit);
 }
 
+void Daemon::start() {
+    Status st;
+#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
+    st = Thread::create("Daemon", "tcmalloc_gc_thread",
+                        [this]() { this->tcmalloc_gc_thread(); },
+                        &_tcmalloc_gc_thread);
+    CHECK(st.ok()) << st.to_string();
+#endif
+    st = Thread::create("Daemon", "memory_maintenance_thread",
+                        [this]() { this->memory_maintenance_thread(); },
+                        &_memory_maintenance_thread);
+    CHECK(st.ok()) << st.to_string();
+
+    if (config::enable_metric_calculator) {
+        st = Thread::create("Daemon", "calculate_metrics_thread",
+                            [this]() { this->calculate_metrics_thread(); },
+                            &_calculate_metrics_thread);
+        CHECK(st.ok()) << st.to_string();
+    }
 }
+
+void Daemon::stop() {
+    _stop_background_threads_latch.count_down();
+
+    if (_tcmalloc_gc_thread) {
+        _tcmalloc_gc_thread->join();
+    }
+    if (_memory_maintenance_thread) {
+        _memory_maintenance_thread->join();
+    }
+    if (_calculate_metrics_thread) {
+        _calculate_metrics_thread->join();
+    }
+}
+
+}  // namespace doris

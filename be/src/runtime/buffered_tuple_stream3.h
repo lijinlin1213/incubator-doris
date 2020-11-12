@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
-#define BDG_PALO_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
+#ifndef DORIS_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
+#define DORIS_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
 
 #include <set>
 #include <vector>
@@ -32,7 +29,7 @@
 #include "runtime/bufferpool/buffer_pool.h"
 #include "runtime/row_batch.h"
 
-namespace palo {
+namespace doris {
 
 class MemTracker;
 class RuntimeState;
@@ -339,7 +336,7 @@ class BufferedTupleStream3 {
   /// process. If the current unused reservation is not sufficient to pin the stream in
   /// memory, this will try to increase the reservation. If that fails, 'got_rows' is set
   /// to false.
-  Status GetRows(MemTracker* tracker, boost::scoped_ptr<RowBatch>* batch,
+  Status GetRows(const std::shared_ptr<MemTracker>& tracker, boost::scoped_ptr<RowBatch>* batch,
       bool* got_rows) WARN_UNUSED_RESULT;
 
   /// Must be called once at the end to cleanup all resources. If 'batch' is non-NULL,
@@ -390,7 +387,7 @@ class BufferedTupleStream3 {
     Status GetBuffer(const BufferPool::BufferHandle** buffer) {
       RETURN_IF_ERROR(handle.GetBuffer(buffer));
       retrieved_buffer = true;
-      return Status::OK;
+      return Status::OK();
     }
     std::string DebugString() const;
 

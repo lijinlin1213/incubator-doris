@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -16,7 +18,7 @@
 #include "agent/topic_subscriber.h"
 #include "common/logging.h"
 
-namespace palo {
+namespace doris {
 
 TopicSubscriber::TopicSubscriber() {
 }
@@ -24,8 +26,8 @@ TopicSubscriber::TopicSubscriber() {
 TopicSubscriber::~TopicSubscriber() {
     // Delete all listeners in the register
     std::map<TTopicType::type, std::vector<TopicListener*>>::iterator it 
-        = _registed_listeners.begin();
-    for (; it != _registed_listeners.end(); ++it) {
+        = _registered_listeners.begin();
+    for (; it != _registered_listeners.end(); ++it) {
         std::vector<TopicListener*>& listeners = it->second;
         std::vector<TopicListener*>::iterator listener_it = listeners.begin();
         for (; listener_it != listeners.end(); ++listener_it) {
@@ -37,7 +39,7 @@ TopicSubscriber::~TopicSubscriber() {
 void TopicSubscriber::register_listener(TTopicType::type topic_type, TopicListener* listener) {
     // Unique lock here to prevent access to listeners
     boost::unique_lock<boost::shared_mutex> lock(_listener_mtx);
-    this->_registed_listeners[topic_type].push_back(listener);
+    this->_registered_listeners[topic_type].push_back(listener);
 }
 
 void TopicSubscriber::handle_updates(const TAgentPublishRequest& agent_publish_request) {
@@ -47,7 +49,7 @@ void TopicSubscriber::handle_updates(const TAgentPublishRequest& agent_publish_r
     const std::vector<TTopicUpdate>& topic_updates = agent_publish_request.updates;
     std::vector<TTopicUpdate>::const_iterator topic_update_it = topic_updates.begin();
     for (; topic_update_it != topic_updates.end(); ++topic_update_it) {
-        std::vector<TopicListener*>& listeners = this->_registed_listeners[topic_update_it->type];
+        std::vector<TopicListener*>& listeners = this->_registered_listeners[topic_update_it->type];
         std::vector<TopicListener*>::iterator listener_it = listeners.begin();
         // Send the update to all listeners with protocol version.
         for (; listener_it != listeners.end(); ++listener_it) {
@@ -56,4 +58,4 @@ void TopicSubscriber::handle_updates(const TAgentPublishRequest& agent_publish_r
         }    
     }
 }
-} // namespace palo
+} // namespace doris

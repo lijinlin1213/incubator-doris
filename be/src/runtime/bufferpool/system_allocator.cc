@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -41,7 +38,7 @@
 //    "(Advanced) If true, advise operating system to back large memory buffers with huge "
 //    "pages");
 
-namespace palo {
+namespace doris {
 
 /// These are the page sizes on x86-64. We could parse /proc/meminfo to programmatically
 /// get this, but it is unlikely to change unless we port to a different architecture.
@@ -66,18 +63,18 @@ Status SystemAllocator::Allocate(int64_t len, BufferPool::BufferHandle* buffer) 
   DCHECK(BitUtil::IsPowerOf2(len)) << len;
 
   uint8_t* buffer_mem;
-  if (config::FLAGS_mmap_buffers) {
+  if (config::mmap_buffers) {
     RETURN_IF_ERROR(AllocateViaMMap(len, &buffer_mem));
   } else {
     RETURN_IF_ERROR(AllocateViaMalloc(len, &buffer_mem));
   }
   buffer->Open(buffer_mem, len, CpuInfo::get_current_core());
-  return Status::OK;
+  return Status::OK();
 }
 
 Status SystemAllocator::AllocateViaMMap(int64_t len, uint8_t** buffer_mem) {
   int64_t map_len = len;
-  bool use_huge_pages = len % HUGE_PAGE_SIZE == 0 && config::FLAGS_madvise_huge_pages;
+  bool use_huge_pages = len % HUGE_PAGE_SIZE == 0 && config::madvise_huge_pages;
   if (use_huge_pages) {
     // Map an extra huge page so we can fix up the alignment if needed.
     map_len += HUGE_PAGE_SIZE;
@@ -85,7 +82,7 @@ Status SystemAllocator::AllocateViaMMap(int64_t len, uint8_t** buffer_mem) {
   uint8_t* mem = reinterpret_cast<uint8_t*>(
       mmap(nullptr, map_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
   if (mem == MAP_FAILED) {
-    return Status(TStatusCode::BUFFER_ALLOCATION_FAILED);
+    return Status::BufferAllocFailed("mmap failed");
   }
 
   if (use_huge_pages) {
@@ -115,11 +112,11 @@ Status SystemAllocator::AllocateViaMMap(int64_t len, uint8_t** buffer_mem) {
 #endif
   }
   *buffer_mem = mem;
-  return Status::OK;
+  return Status::OK();
 }
 
 Status SystemAllocator::AllocateViaMalloc(int64_t len, uint8_t** buffer_mem) {
-  bool use_huge_pages = len % HUGE_PAGE_SIZE == 0 && config::FLAGS_madvise_huge_pages;
+  bool use_huge_pages = len % HUGE_PAGE_SIZE == 0 && config::madvise_huge_pages;
   // Allocate, aligned to the page size that we expect to back the memory range.
   // This ensures that it can be backed by a whole pages, rather than parts of pages.
   size_t alignment = use_huge_pages ? HUGE_PAGE_SIZE : SMALL_PAGE_SIZE;
@@ -132,7 +129,7 @@ Status SystemAllocator::AllocateViaMalloc(int64_t len, uint8_t** buffer_mem) {
   if (rc != 0) {
     std::stringstream ss;
     ss << "posix_memalign() failed to allocate buffer: " << get_str_err_msg();
-    return Status(ss.str());
+    return Status::InternalError(ss.str());
   }
   if (use_huge_pages) {
 #ifdef MADV_HUGEPAGE
@@ -143,15 +140,15 @@ Status SystemAllocator::AllocateViaMalloc(int64_t len, uint8_t** buffer_mem) {
     DCHECK(rc == 0) << "madvise(MADV_HUGEPAGE) shouldn't fail" << errno;
 #endif
   }
-  return Status::OK;
+  return Status::OK();
 }
 
 void SystemAllocator::Free(BufferPool::BufferHandle&& buffer) {
-  if (config::FLAGS_mmap_buffers) {
+  if (config::mmap_buffers) {
     int rc = munmap(buffer.data(), buffer.len());
     DCHECK_EQ(rc, 0) << "Unexpected munmap() error: " << errno;
   } else {
-    bool use_huge_pages = buffer.len() % HUGE_PAGE_SIZE == 0 && config::FLAGS_madvise_huge_pages;
+    bool use_huge_pages = buffer.len() % HUGE_PAGE_SIZE == 0 && config::madvise_huge_pages;
     if (use_huge_pages) {
       // Undo the madvise so that is isn't a candidate to be newly backed by huge pages.
       // We depend on TCMalloc's "aggressive decommit" mode decommitting the physical

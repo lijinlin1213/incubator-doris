@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -27,7 +29,7 @@
 #include "exec/exec_node.h"
 #include "util/debug_util.h"
 
-namespace palo {
+namespace doris {
 
 class InOpTest : public ::testing::Test {
 public:
@@ -182,37 +184,37 @@ TEST_F(InOpTest, SimplePerformanceTest) {
         ASSERT_TRUE(expr != NULL);
         ASSERT_TRUE(expr->prepare(_runtime_state, *_row_desc).ok());
         int size = 1024 * 1024 / capacity;
-        VectorizedRowBatch* vec_row_batchs[size];
+        VectorizedRowBatch* vec_row_batches[size];
         srand(time(NULL));
 
         for (int i = 0; i < size; ++i) {
-            vec_row_batchs[i] = _object_pool->add(
+            vec_row_batches[i] = _object_pool->add(
                     new VectorizedRowBatch(
                         *_runtime_state->desc_tbl().get_tuple_descriptor(0), capacity));
-            MemPool* mem_pool = vec_row_batchs[i]->mem_pool();
+            MemPool* mem_pool = vec_row_batches[i]->mem_pool();
             int32_t* vec_data = reinterpret_cast<int32_t*>(
                     mem_pool->allocate(sizeof(int32_t) * capacity));
-            vec_row_batchs[i]->column(0)->set_col_data(vec_data);
+            vec_row_batches[i]->column(0)->set_col_data(vec_data);
 
             for (int i = 0; i < capacity; ++i) {
                 vec_data[i] = rand() % 256;
             }
 
-            vec_row_batchs[i]->set_size(capacity);
+            vec_row_batches[i]->set_size(capacity);
         }
 
-        RowBatch* row_batchs[size];
+        RowBatch* row_batches[size];
 
         for (int i = 0; i < size; ++i) {
-            row_batchs[i] = _object_pool->add(new RowBatch(*_row_desc, capacity));
-            vec_row_batchs[i]->to_row_batch(row_batchs[i]);
+            row_batches[i] = _object_pool->add(new RowBatch(*_row_desc, capacity));
+            vec_row_batches[i]->to_row_batch(row_batches[i]);
         }
 
         MonotonicStopWatch stopwatch;
         stopwatch.start();
 
         for (int i = 0; i < size; ++i) {
-            expr->evaluate(vec_row_batchs[i]);
+            expr->evaluate(vec_row_batches[i]);
         }
 
         uint64_t vec_time = stopwatch.elapsed_time();
@@ -222,7 +224,7 @@ TEST_F(InOpTest, SimplePerformanceTest) {
 
         for (int i = 0; i < size; ++i) {
             for (int j = 0; j < capacity; ++j) {
-                ExecNode::eval_conjuncts(&expr, 1, row_batchs[i]->get_row(j));
+                ExecNode::eval_conjuncts(&expr, 1, row_batches[i]->get_row(j));
             }
         }
 

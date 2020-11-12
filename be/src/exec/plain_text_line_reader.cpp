@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -31,9 +28,9 @@
 // #define INPUT_CHUNK  (34)
 #define OUTPUT_CHUNK (8 * 1024 * 1024)
 // #define OUTPUT_CHUNK (32)
-// leave these 2 size small for debuging
+// leave these 2 size small for debugging
 
-namespace palo {
+namespace doris {
 
 PlainTextLineReader::PlainTextLineReader(
         RuntimeProfile* profile,
@@ -56,7 +53,7 @@ PlainTextLineReader::PlainTextLineReader(
             _output_buf_limit(0),
             _file_eof(false),
             _eof(false),
-            _stream_end(false),
+            _stream_end(true),
             _more_input_bytes(0),
             _more_output_bytes(0),
             _bytes_read_counter(nullptr),
@@ -117,7 +114,7 @@ void PlainTextLineReader::extend_input_buf() {
 
         capacity = capacity + _input_buf_pos;
         if (capacity >= _more_input_bytes) {
-            // move the read remainings to the begining of the current input buf,
+            // move the read remaining to the beginning of the current input buf,
             memmove(_input_buf, _input_buf + _input_buf_pos, input_buf_read_remaining());
             _input_buf_limit -= _input_buf_pos;
             _input_buf_pos = 0;
@@ -158,7 +155,7 @@ void PlainTextLineReader::extend_output_buf() {
         // 2. try reuse buf
         capacity = capacity + _output_buf_pos;
         if (capacity >= target) {
-            // move the read remainings to the begining of the current output buf,
+            // move the read remaining to the beginning of the current output buf,
             memmove(_output_buf, _output_buf + _output_buf_pos, output_buf_read_remaining());
             _output_buf_limit -= _output_buf_pos;
             _output_buf_pos = 0;
@@ -189,7 +186,7 @@ Status PlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool* e
     if (_eof || update_eof()) {
         *size = 0;
         *eof = true;
-        return Status::OK;
+        return Status::OK();
     }
     int found_line_delimiter = 0;
     size_t offset = 0;
@@ -246,13 +243,12 @@ Status PlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool* e
                     if (!_stream_end) {
                         std::stringstream ss;
                         ss << "Compressed file has been truncated, which is not allowed";
-                        return Status(ss.str());
+                        return Status::InternalError(ss.str());
                     } else {
                         // last loop we meet stream end,
                         // and now we finished reading file, so we are finished
-                        *size = 0;
-                        *eof = true;
-                        return Status::OK;
+                        // break this loop to see if there is data in buffer
+                        break;
                     }
                 }
 
@@ -260,7 +256,7 @@ Status PlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool* e
                     _output_buf_limit += read_len;
                     _stream_end = true;
                 } else {
-                    // only update inpub limit.
+                    // only update input limit.
                     // input pos is set at MARK step
                     _input_buf_limit += read_len;
                 }
@@ -314,11 +310,11 @@ Status PlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool* e
 
                     // (cmy), for now, return failed to avoid potential endless loop
                     std::stringstream ss;
-                    ss << "decompress made no progess."
+                    ss << "decompress made no progress."
                        << " input_read_bytes: " << input_read_bytes
                        << " decompressed_len: " << decompressed_len;
                     LOG(WARNING) << ss.str();
-                    return Status(ss.str());
+                    return Status::InternalError(ss.str());
                 }
 
                 if (_more_input_bytes > 0) {
@@ -348,7 +344,7 @@ Status PlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool* e
     // update total read bytes
     _total_read_bytes += *size + found_line_delimiter;
 
-    return Status::OK;
+    return Status::OK();
 }
 
 } // end of namespace

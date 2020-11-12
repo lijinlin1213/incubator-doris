@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -24,6 +26,7 @@
 #include <event2/http.h>
 #include <event2/http_struct.h>
 #include <event2/keyvalq_struct.h>
+#include <event2/thread.h>
 
 #include "common/logging.h"
 #include "service/brpc.h"
@@ -32,8 +35,9 @@
 #include "http/http_headers.h"
 #include "http/http_channel.h"
 #include "util/debug_util.h"
+#include "util/threadpool.h"
 
-namespace palo {
+namespace doris {
 
 static void on_chunked(struct evhttp_request* ev_req, void* param) {
     HttpRequest* request = (HttpRequest*)ev_req->on_free_cb_arg;
@@ -68,59 +72,66 @@ static int on_connection(struct evhttp_request* req, void* param) {
 }
 
 EvHttpServer::EvHttpServer(int port, int num_workers)
-        : _host("0.0.0.0"), _port(port), _num_workers(num_workers) {
+        : _host("0.0.0.0"), _port(port), _num_workers(num_workers), _real_port(0) {
     DCHECK_GT(_num_workers, 0);
     auto res = pthread_rwlock_init(&_rw_lock, nullptr);                
     DCHECK_EQ(res, 0);
 }
 
 EvHttpServer::EvHttpServer(const std::string& host, int port, int num_workers)
-        : _host(host), _port(port), _num_workers(num_workers) {
+        : _host(host), _port(port), _num_workers(num_workers), _real_port(0) {
     DCHECK_GT(_num_workers, 0);
     auto res = pthread_rwlock_init(&_rw_lock, nullptr);                
     DCHECK_EQ(res, 0);
 }
 
 EvHttpServer::~EvHttpServer() {
+    stop();
     pthread_rwlock_destroy(&_rw_lock);
 }
 
-Status EvHttpServer::start() {
+void EvHttpServer::start() {
     // bind to 
-    RETURN_IF_ERROR(_bind());
+    auto s = _bind();
+    CHECK(s.ok()) << s.to_string();
+    ThreadPoolBuilder("EvHttpServer")
+            .set_min_threads(_num_workers)
+            .set_max_threads(_num_workers)
+            .build(&_workers);
+
+    evthread_use_pthreads();
+    event_bases.resize(_num_workers);
     for (int i = 0; i < _num_workers; ++i) {
-        auto worker = [this, i] () {
-            LOG(INFO) << "EvHttpSerer worker start, id=" << i;
-            std::shared_ptr<event_base> base(
-                event_base_new(), [] (event_base* base) { event_base_free(base); });
-            if (base == nullptr) {
-                LOG(WARNING) << "Couldn't create an event_base.";
-                return; 
-            }
+        CHECK(_workers->submit_func([this, i]() {
+            std::shared_ptr<event_base> base(event_base_new(), [](event_base *base) {
+                event_base_free(base);
+            });
+            CHECK(base != nullptr) << "Couldn't create an event_base.";
+            event_bases[i] = base;
+
             /* Create a new evhttp object to handle requests. */
-            std::shared_ptr<evhttp> http(
-                evhttp_new(base.get()), [] (evhttp* http) { evhttp_free(http); });
-            if (http == nullptr) {
-                LOG(WARNING) << "Couldn't create an evhttp.";
-                return; 
-            }
+            std::shared_ptr<evhttp> http(evhttp_new(base.get()), [](evhttp *http) {
+                evhttp_free(http);
+            });
+            CHECK(http != nullptr) << "Couldn't create an evhttp.";
+
             auto res = evhttp_accept_socket(http.get(), _server_fd);
-            if (res < 0) {
-                LOG(WARNING) << "evhttp accept socket failed";
-                return;
-            }
+            CHECK(res >= 0) << "evhttp accept socket failed, res=" << res;
 
             evhttp_set_newreqcb(http.get(), on_connection, this);
             evhttp_set_gencb(http.get(), on_request, this);
 
             event_base_dispatch(base.get());
-        };
-        _workers.emplace_back(worker);
+        }).ok());
     }
-    return Status::OK;
 }
 
 void EvHttpServer::stop() {
+    for (int i = 0; i < _num_workers; ++i) {
+        LOG(WARNING) << "event_base_loopexit ret: " << event_base_loopexit(event_bases[i].get(), nullptr);
+    }
+    _workers->shutdown();
+    close(_server_fd);
 }
 
 void EvHttpServer::join() {
@@ -132,7 +143,7 @@ Status EvHttpServer::_bind() {
     if (res < 0) {
         std::stringstream ss;
         ss << "convert address failed, host=" << _host << ", port=" << _port;
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
     _server_fd = butil::tcp_listen(point, true);
     if (_server_fd < 0) {
@@ -140,7 +151,15 @@ Status EvHttpServer::_bind() {
         std::stringstream ss;
         ss << "tcp listen failed, errno=" << errno
             << ", errmsg=" << strerror_r(errno, buf, sizeof(buf));
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
+    }
+    if (_port == 0) {
+        struct sockaddr_in addr; 
+        socklen_t socklen = sizeof(addr); 
+        const int rc = getsockname(_server_fd, (struct sockaddr *)&addr, &socklen);
+        if (rc == 0) {
+            _real_port = ntohs(addr.sin_port);
+        }
     }
     res = butil::make_non_blocking(_server_fd);
     if (res < 0) {
@@ -148,9 +167,9 @@ Status EvHttpServer::_bind() {
         std::stringstream ss;
         ss << "make socket to non_blocking failed, errno=" << errno
             << ", errmsg=" << strerror_r(errno, buf, sizeof(buf));
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
-    return Status::OK;
+    return Status::OK();
 }
 
 bool EvHttpServer::register_handler(
@@ -194,6 +213,14 @@ bool EvHttpServer::register_handler(
     return result;
 }
 
+void EvHttpServer::register_static_file_handler(HttpHandler* handler) {
+    DCHECK(handler != nullptr);
+    DCHECK(_static_file_handler == nullptr);
+    pthread_rwlock_wrlock(&_rw_lock);
+    _static_file_handler = handler;
+    pthread_rwlock_unlock(&_rw_lock);
+}
+
 int EvHttpServer::on_header(struct evhttp_request* ev_req) {
     std::unique_ptr<HttpRequest> request(new HttpRequest(ev_req));
     auto res = request->init_from_evhttp();
@@ -235,6 +262,10 @@ HttpHandler* EvHttpServer::_find_handler(HttpRequest* req) {
     switch (req->method()) {
     case GET:
         _get_handlers.retrieve(path, &handler, req->params());
+        // Static file handler is a fallback handler
+        if (handler == nullptr) {
+            handler = _static_file_handler;
+        }
         break;
     case PUT:
         _put_handlers.retrieve(path, &handler, req->params());

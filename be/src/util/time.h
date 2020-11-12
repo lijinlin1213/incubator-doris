@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,17 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_UTIL_TIME_H
-#define BDG_PALO_BE_UTIL_TIME_H
+#ifndef DORIS_BE_UTIL_TIME_H
+#define DORIS_BE_UTIL_TIME_H
 
 #include <stdint.h>
 #include <time.h>
 #include <string>
 
-#include "gutil/walltime.h"
+#define NANOS_PER_SEC  1000000000ll
+#define NANOS_PER_MICRO      1000ll
+#define MICROS_PER_SEC    1000000ll
+#define MICROS_PER_MILLI     1000ll
+#define MILLIS_PER_SEC       1000ll
 
 /// Utilities for collecting timings.
-namespace palo {
+namespace doris {
 
 /// Returns a value representing a point in time that is unaffected by daylight savings or
 /// manual adjustments to the system clock. This should not be assumed to be a Unix
@@ -38,6 +39,12 @@ inline int64_t MonotonicNanos() {
   timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ts.tv_sec * NANOS_PER_SEC + ts.tv_nsec;
+}
+
+inline int64_t GetMonoTimeMicros() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * MICROS_PER_SEC + ts.tv_nsec / NANOS_PER_MICRO;
 }
 
 inline int64_t MonotonicMicros() {  // 63 bits ~= 5K years uptime
@@ -52,12 +59,31 @@ inline int64_t MonotonicSeconds() {
   return GetMonoTimeMicros() / MICROS_PER_SEC;
 }
 
+inline double GetMonoTimeSecondsAsDouble() {
+    return GetMonoTimeMicros() / static_cast<double>(MICROS_PER_SEC);
+}
+
+// Returns the time since the Epoch measured in microseconds.
+inline int64_t GetCurrentTimeMicros() {
+  timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return ts.tv_sec * MICROS_PER_SEC + ts.tv_nsec / NANOS_PER_MICRO;
+}
+
 /// Returns the number of milliseconds that have passed since the Unix epoch. This is
 /// affected by manual changes to the system clock but is more suitable for use across
 /// a cluster. For more accurate timings on the local host use the monotonic functions
 /// above.
 inline int64_t UnixMillis() {
   return GetCurrentTimeMicros() / MICROS_PER_MILLI;
+}
+
+/// Returns the number of seconds that have passed since the Unix epoch. This is
+/// affected by manual changes to the system clock but is more suitable for use across
+/// a cluster. For more accurate timings on the local host use the monotonic functions
+/// above.
+inline int64_t UnixSeconds() {
+    return GetCurrentTimeMicros() / MICROS_PER_SEC;
 }
 
 /// Returns the number of microseconds that have passed since the Unix epoch. This is

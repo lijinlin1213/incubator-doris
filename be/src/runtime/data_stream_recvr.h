@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
-#define BDG_PALO_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
+#ifndef DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
+#define DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
 
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread/mutex.hpp>
@@ -28,6 +25,7 @@
 #include "common/status.h"
 #include "gen_cpp/Types_types.h" // for TUniqueId
 #include "runtime/descriptors.h"
+#include "runtime/query_statistics.h"
 #include "util/tuple_row_compare.h"
 
 namespace google {
@@ -36,7 +34,7 @@ class Closure;
 }
 }
 
-namespace palo {
+namespace doris {
 
 class DataStreamMgr;
 class SortedRunMerger;
@@ -100,16 +98,21 @@ public:
     const TUniqueId& fragment_instance_id() const { return _fragment_instance_id; }
     PlanNodeId dest_node_id() const { return _dest_node_id; }
     const RowDescriptor& row_desc() const { return _row_desc; }
-    MemTracker* mem_tracker() const { return _mem_tracker.get(); }
+    std::shared_ptr<MemTracker> mem_tracker() const { return _mem_tracker; }
+
+    void add_sub_plan_statistics(const PQueryStatistics& statistics, int sender_id) {
+        _sub_plan_query_statistics_recvr->insert(statistics, sender_id);
+    }
 
 private:
     friend class DataStreamMgr;
     class SenderQueue;
 
-    DataStreamRecvr(DataStreamMgr* stream_mgr, MemTracker* parent_tracker,
+    DataStreamRecvr(DataStreamMgr* stream_mgr, const std::shared_ptr<MemTracker>& parent_tracker,
             const RowDescriptor& row_desc, const TUniqueId& fragment_instance_id,
-            PlanNodeId dest_node_id, int num_senders, bool is_merging, int total_buffer_limit,
-            RuntimeProfile* profile);
+            PlanNodeId dest_node_id, int num_senders, bool is_merging, 
+            int total_buffer_limit, RuntimeProfile* profile, 
+            std::shared_ptr<QueryStatisticsRecvr> sub_plan_query_statistics_recvr);
 
     // If receive queue is full, done is enqueue pending, and return with *done is nullptr
     void add_batch(const PRowBatch& batch, int sender_id,
@@ -152,7 +155,7 @@ private:
     AtomicInt<int> _num_buffered_bytes;
 
     // Memtracker for batches in the sender queue(s).
-    boost::scoped_ptr<MemTracker> _mem_tracker;
+    std::shared_ptr<MemTracker> _mem_tracker;
 
     // One or more queues of row batches received from senders. If _is_merging is true,
     // there is one SenderQueue for each sender. Otherwise, row batches from all senders
@@ -174,9 +177,8 @@ private:
 
     // Time series of number of bytes received, samples _bytes_received_counter
     // RuntimeProfile::TimeSeriesCounter* _bytes_received_time_series_counter;
-
     RuntimeProfile::Counter* _deserialize_row_batch_timer;
-
+    
     // Time spent waiting until the first batch arrives across all queues.
     // TODO: Turn this into a wall-clock timer.
     RuntimeProfile::Counter* _first_batch_wait_total_timer;
@@ -187,20 +189,13 @@ private:
     // time.
     RuntimeProfile::Counter* _buffer_full_total_timer;
 
-    // Protects access to _buffer_full_wall_timer. We only want one
-    // thread to be running the timer at any time, and we use this
-    // try_mutex to enforce this condition. If a thread does not get
-    // the lock, it continues to execute, but without running the
-    // timer.
-    boost::try_mutex _buffer_wall_timer_lock;
-
-    // Wall time senders spend waiting for the recv buffer to have capacity.
-    RuntimeProfile::Counter* _buffer_full_wall_timer;
+    // Sub plan query statistics receiver.
+    std::shared_ptr<QueryStatisticsRecvr> _sub_plan_query_statistics_recvr;
 
     // Total time spent waiting for data to arrive in the recv buffer
-    // RuntimeProfile::Counter* _data_arrival_timer;
+    RuntimeProfile::Counter* _data_arrival_timer;
 };
 
-} // end namespace palo
+} // end namespace doris
 
-#endif // end BDG_PALO_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
+#endif // end DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H

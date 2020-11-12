@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -50,7 +47,7 @@ using boost::try_mutex;
 using boost::lock_guard;
 using boost::mem_fn;
 
-namespace palo {
+namespace doris {
 
 // Implements a blocking queue of row batches from one or more senders. One queue
 // is maintained per sender if _is_merging is true for the enclosing receiver, otherwise
@@ -117,7 +114,7 @@ private:
 
     // queue of (batch length, batch) pairs.  The SenderQueue block owns memory to
     // these batches. They are handed off to the caller via get_batch.
-    typedef list<pair<int, RowBatch*> > RowBatchQueue;
+    typedef list<pair<int, RowBatch*>> RowBatchQueue;
     RowBatchQueue _batch_queue;
 
     // The batch that was most recently returned via get_batch(), i.e. the current batch
@@ -131,7 +128,7 @@ private:
     std::unordered_set<int> _sender_eos_set; // sender_id
     std::unordered_map<int, int64_t> _packet_seq_map; // be_number => packet_seq
 
-    std::deque<google::protobuf::Closure*> _pending_closures;
+    std::deque<std::pair<google::protobuf::Closure*, MonotonicStopWatch>> _pending_closures;
 };
 
 DataStreamRecvr::SenderQueue::SenderQueue(
@@ -149,10 +146,9 @@ Status DataStreamRecvr::SenderQueue::get_batch(RowBatch** next_batch) {
         VLOG_ROW << "wait arrival fragment_instance_id=" << _recvr->fragment_instance_id()
             << " node=" << _recvr->dest_node_id();
         // Don't count time spent waiting on the sender as active time.
-        // CANCEL_SAFE_SCOPED_TIMER(_recvr->_data_arrival_timer, &_is_cancelled);
-        // CANCEL_SAFE_SCOPED_TIMER(
-        //         _received_first_batch ? NULL : _recvr->_first_batch_wait_total_timer,
-        //         &_is_cancelled);
+        CANCEL_SAFE_SCOPED_TIMER(_recvr->_data_arrival_timer, &_is_cancelled);
+        CANCEL_SAFE_SCOPED_TIMER(_received_first_batch ? NULL : _recvr->_first_batch_wait_total_timer,
+                &_is_cancelled);
         _data_arrival_cv.wait(l);
     }
 
@@ -160,12 +156,12 @@ Status DataStreamRecvr::SenderQueue::get_batch(RowBatch** next_batch) {
     _current_batch.reset();
     *next_batch = NULL;
     if (_is_cancelled) {
-        return Status::CANCELLED;
+        return Status::Cancelled("Cancelled");
     }
 
     if (_batch_queue.empty()) {
         DCHECK_EQ(_num_remaining_senders, 0);
-        return Status::OK;
+        return Status::OK();
     }
 
     _received_first_batch = true;
@@ -180,12 +176,15 @@ Status DataStreamRecvr::SenderQueue::get_batch(RowBatch** next_batch) {
     *next_batch = _current_batch.get();
 
     if (!_pending_closures.empty()) {
-        auto done = _pending_closures.front();
-        done->Run();
+        auto closure_pair = _pending_closures.front();
+        closure_pair.first->Run();
         _pending_closures.pop_front();
+
+        closure_pair.second.stop();
+        _recvr->_buffer_full_total_timer->update(closure_pair.second.elapsed_time());
     }
 
-    return Status::OK;
+    return Status::OK();
 }
 
 void DataStreamRecvr::SenderQueue::add_batch(
@@ -223,7 +222,7 @@ void DataStreamRecvr::SenderQueue::add_batch(
     }
 
     // We always accept the batch regardless of buffer limit, to avoid rpc pipeline stall.
-    // If exceed buffer limit, we just do not respoinse ACK to client, so the client won't
+    // If exceed buffer limit, we just do not response ACK to client, so the client won't
     // send data until receive ACK.
     // Note that if this be needs to receive data from N BEs, the size of buffer
     // may reach as many as (buffer_size + n * buffer_size)
@@ -243,15 +242,18 @@ void DataStreamRecvr::SenderQueue::add_batch(
         // Note: if this function makes a row batch, the batch *must* be added
         // to _batch_queue. It is not valid to create the row batch and destroy
         // it in this thread.
-        batch = new RowBatch(_recvr->row_desc(), pb_batch, _recvr->mem_tracker());
+        batch = new RowBatch(_recvr->row_desc(), pb_batch, _recvr->mem_tracker().get());
     }
+   
     VLOG_ROW << "added #rows=" << batch->num_rows()
         << " batch_size=" << batch_size << "\n";
     _batch_queue.emplace_back(batch_size, batch);
     // if done is nullptr, this function can't delay this response
     if (done != nullptr && _recvr->exceeds_limit(batch_size)) {
+        MonotonicStopWatch monotonicStopWatch;
+        monotonicStopWatch.start();
         DCHECK(*done != nullptr);
-        _pending_closures.push_back(*done);
+        _pending_closures.emplace_back(*done, monotonicStopWatch);
         *done = nullptr;
     }
     _recvr->_num_buffered_bytes += batch_size;
@@ -295,8 +297,8 @@ void DataStreamRecvr::SenderQueue::cancel() {
 
     {
         boost::lock_guard<boost::mutex> l(_lock);
-        for (auto done : _pending_closures) {
-            done->Run();
+        for (auto closure_pair : _pending_closures) {
+            closure_pair.first->Run();
         }
         _pending_closures.clear();
     }
@@ -310,8 +312,8 @@ void DataStreamRecvr::SenderQueue::close() {
         boost::lock_guard<boost::mutex> l(_lock);
         _is_cancelled = true;
 
-        for (auto done : _pending_closures) {
-            done->Run();
+        for (auto closure_pair : _pending_closures) {
+            closure_pair.first->Run();
         }
         _pending_closures.clear();
     }
@@ -338,7 +340,7 @@ Status DataStreamRecvr::create_merger(const TupleRowComparator& less_than) {
                 bind(mem_fn(&SenderQueue::get_batch), _sender_queues[i], _1));
     }
     RETURN_IF_ERROR(_merger->prepare(input_batch_suppliers));
-    return Status::OK;
+    return Status::OK();
 }
 
 void DataStreamRecvr::transfer_all_resources(RowBatch* transfer_batch) {
@@ -350,10 +352,11 @@ void DataStreamRecvr::transfer_all_resources(RowBatch* transfer_batch) {
 }
 
 DataStreamRecvr::DataStreamRecvr(
-        DataStreamMgr* stream_mgr, MemTracker* parent_tracker,
+        DataStreamMgr* stream_mgr, const std::shared_ptr<MemTracker>& parent_tracker,
         const RowDescriptor& row_desc, const TUniqueId& fragment_instance_id,
-        PlanNodeId dest_node_id, int num_senders, bool is_merging, int total_buffer_limit,
-        RuntimeProfile* profile) :
+        PlanNodeId dest_node_id, int num_senders, bool is_merging, 
+        int total_buffer_limit, RuntimeProfile* profile, 
+        std::shared_ptr<QueryStatisticsRecvr> sub_plan_query_statistics_recvr) :
             _mgr(stream_mgr),
             _fragment_instance_id(fragment_instance_id),
             _dest_node_id(dest_node_id),
@@ -361,8 +364,9 @@ DataStreamRecvr::DataStreamRecvr(
             _row_desc(row_desc),
             _is_merging(is_merging),
             _num_buffered_bytes(0),
-            _profile(profile) {
-    _mem_tracker.reset(new MemTracker(-1, "DataStreamRecvr", parent_tracker));
+            _profile(profile),
+            _sub_plan_query_statistics_recvr(sub_plan_query_statistics_recvr) {
+    _mem_tracker = MemTracker::CreateTracker(_profile, -1, "DataStreamRecvr", parent_tracker);
 
     // Create one queue per sender if is_merging is true.
     int num_queues = is_merging ? num_senders : 1;
@@ -381,9 +385,8 @@ DataStreamRecvr::DataStreamRecvr(
     //     ADD_TIME_SERIES_COUNTER(_profile, "BytesReceived", _bytes_received_counter);
     _deserialize_row_batch_timer =
         ADD_TIMER(_profile, "DeserializeRowBatchTimer");
-    _buffer_full_wall_timer = ADD_TIMER(_profile, "SendersBlockedTimer");
+    _data_arrival_timer = ADD_TIMER(_profile, "DataArrivalWaitTime");
     _buffer_full_total_timer = ADD_TIMER(_profile, "SendersBlockedTotalTimer(*)");
-    // _data_arrival_timer = _profile->inactive_timer();
     _first_batch_wait_total_timer = ADD_TIMER(_profile, "FirstBatchArrivalWaitTime");
 }
 
@@ -421,8 +424,7 @@ void DataStreamRecvr::close() {
     _mgr->deregister_recvr(fragment_instance_id(), dest_node_id());
     _mgr = NULL;
     _merger.reset();
-    _mem_tracker->close();
-    _mem_tracker->unregister_from_parent();
+    // TODO: Maybe shared tracker doesn't need to be reset manually
     _mem_tracker.reset();
 }
 

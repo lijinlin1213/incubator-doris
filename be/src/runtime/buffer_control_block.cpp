@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,7 +22,7 @@
 #include "util/thrift_util.h"
 #include "service/brpc.h"
 
-namespace palo {
+namespace doris {
 
 void GetResultBatchCtx::on_failure(const Status& status) {
     DCHECK(!status.ok()) << "status is ok, errmsg=" << status.get_error_msg();
@@ -34,9 +31,13 @@ void GetResultBatchCtx::on_failure(const Status& status) {
     delete this;
 }
 
-void GetResultBatchCtx::on_close(int64_t packet_seq) {
+void GetResultBatchCtx::on_close(int64_t packet_seq,
+                 QueryStatistics* statistics) {
     Status status;
     status.to_protobuf(result->mutable_status());
+    if (statistics != nullptr) {
+        statistics->to_pb(result->mutable_query_statistics());
+    }
     result->set_packet_seq(packet_seq);
     result->set_eos(true);
     done->Run();
@@ -79,14 +80,14 @@ BufferControlBlock::~BufferControlBlock() {
 }
 
 Status BufferControlBlock::init() {
-    return Status::OK;
+    return Status::OK();
 }
 
 Status BufferControlBlock::add_batch(TFetchDataResult* result) {
     boost::unique_lock<boost::mutex> l(_lock);
 
     if (_is_cancelled) {
-        return Status::CANCELLED;
+        return Status::Cancelled("Cancelled");
     }
 
     int num_rows = result->result_batch.rows.size();
@@ -97,13 +98,13 @@ Status BufferControlBlock::add_batch(TFetchDataResult* result) {
     }
 
     if (_is_cancelled) {
-        return Status::CANCELLED;
+        return Status::Cancelled("Cancelled");
     }
 
     if (_waiting_rpc.empty()) {
         _buffer_rows += num_rows;
         _batch_queue.push_back(result);
-        _data_arriaval.notify_one();
+        _data_arrival.notify_one();
     } else {
         auto ctx = _waiting_rpc.front();
         _waiting_rpc.pop_front();
@@ -111,7 +112,7 @@ Status BufferControlBlock::add_batch(TFetchDataResult* result) {
         delete result;
         _packet_num++;
     }
-    return Status::OK;
+    return Status::OK();
 }
 
 Status BufferControlBlock::get_batch(TFetchDataResult* result) {
@@ -120,7 +121,7 @@ Status BufferControlBlock::get_batch(TFetchDataResult* result) {
         boost::unique_lock<boost::mutex> l(_lock);
 
         while (_batch_queue.empty() && !_is_close && !_is_cancelled) {
-            _data_arriaval.wait(l);
+            _data_arrival.wait(l);
         }
 
         // if Status has been set, return fail;
@@ -128,7 +129,7 @@ Status BufferControlBlock::get_batch(TFetchDataResult* result) {
 
         // cancelled
         if (_is_cancelled) {
-            return Status::CANCELLED;
+            return Status::Cancelled("Cancelled");
         }
 
         if (_batch_queue.empty()) {
@@ -137,10 +138,10 @@ Status BufferControlBlock::get_batch(TFetchDataResult* result) {
                 result->eos = true;
                 result->__set_packet_num(_packet_num);
                 _packet_num++;
-                return Status::OK;
+                return Status::OK();
             } else {
                 // can not get here
-                return Status("Internal error, can not Get here!");
+                return Status::InternalError("Internal error, can not Get here!");
             }
         }
 
@@ -157,7 +158,7 @@ Status BufferControlBlock::get_batch(TFetchDataResult* result) {
     delete item;
     item = NULL;
 
-    return Status::OK;
+    return Status::OK();
 }
 
 void BufferControlBlock::get_batch(GetResultBatchCtx* ctx) {
@@ -167,7 +168,7 @@ void BufferControlBlock::get_batch(GetResultBatchCtx* ctx) {
         return;
     }
     if (_is_cancelled) {
-        ctx->on_failure(Status::CANCELLED);
+        ctx->on_failure(Status::Cancelled("Cancelled"));
         return;
     }
     if (!_batch_queue.empty()) {
@@ -186,7 +187,7 @@ void BufferControlBlock::get_batch(GetResultBatchCtx* ctx) {
         return;
     }
     if (_is_close) {
-        ctx->on_close(_packet_num);
+        ctx->on_close(_packet_num, _query_statistics.get());
         return;
     }
     // no ready data, push ctx to waiting list
@@ -199,11 +200,11 @@ Status BufferControlBlock::close(Status exec_status) {
     _status = exec_status;
 
     // notify blocked get thread
-    _data_arriaval.notify_all();
+    _data_arrival.notify_all();
     if (!_waiting_rpc.empty()) {
         if (_status.ok()) {
             for (auto& ctx : _waiting_rpc) {
-                ctx->on_close(_packet_num);
+                ctx->on_close(_packet_num, _query_statistics.get());
             }
         } else {
             for (auto& ctx : _waiting_rpc) {
@@ -212,19 +213,19 @@ Status BufferControlBlock::close(Status exec_status) {
         }
         _waiting_rpc.clear();
     }
-    return Status::OK;
+    return Status::OK();
 }
 
 Status BufferControlBlock::cancel() {
     boost::unique_lock<boost::mutex> l(_lock);
     _is_cancelled = true;
     _data_removal.notify_all();
-    _data_arriaval.notify_all();
+    _data_arrival.notify_all();
     for (auto& ctx : _waiting_rpc) {
-        ctx->on_failure(Status::CANCELLED);
+        ctx->on_failure(Status::Cancelled("Cancelled"));
     }
     _waiting_rpc.clear();
-    return Status::OK;
+    return Status::OK();
 }
 
 }

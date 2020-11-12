@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,7 +19,6 @@
 
 #include <sstream>
 
-#include "codegen/llvm_codegen.h"
 #include "common/logging.h"
 #include "exprs/aggregate_functions.h"
 #include "exprs/agg_fn.h"
@@ -31,7 +27,6 @@
 #include "exprs/expr.h"
 #include "exprs/scalar_fn_call.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/lib_cache.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
@@ -43,9 +38,8 @@
 
 #include "common/names.h"
 
-using namespace palo;
-using namespace palo_udf;
-using namespace llvm;
+using namespace doris;
+using namespace doris_udf;
 using std::move;
 
 // typedef for builtin aggregate functions. Unfortunately, these type defs don't
@@ -70,25 +64,43 @@ typedef void (*UpdateFn7)(FunctionContext*, const AnyVal&, const AnyVal&,
 typedef void (*UpdateFn8)(FunctionContext*, const AnyVal&, const AnyVal&,
     const AnyVal&, const AnyVal&, const AnyVal&, const AnyVal&, const AnyVal&,
     const AnyVal&, AnyVal*);
+
+typedef void (*VarargUpdateFn0)(FunctionContext*, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn1)(FunctionContext*, const AnyVal&, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn2)(FunctionContext*, const AnyVal&, const AnyVal&, int num_varargs,
+        const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn3)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn4)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        const AnyVal&, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn5)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        const AnyVal&, const AnyVal&, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn6)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        const AnyVal&, const AnyVal&, const AnyVal&, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn7)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        const AnyVal&, const AnyVal&, const AnyVal&, const AnyVal&, int num_varargs, const AnyVal*, AnyVal*);
+typedef void (*VarargUpdateFn8)(FunctionContext*, const AnyVal&, const AnyVal&, const AnyVal&,
+        const AnyVal&, const AnyVal&, const AnyVal&, const AnyVal&, const AnyVal&, int num_varargs,
+        const AnyVal*,  AnyVal*);
+
 typedef StringVal (*SerializeFn)(FunctionContext*, const StringVal&);
 typedef AnyVal (*GetValueFn)(FunctionContext*, const AnyVal&);
 typedef AnyVal (*FinalizeFn)(FunctionContext*, const AnyVal&);
 
-const char* NewAggFnEvaluator::LLVM_CLASS_NAME = "class.impala::NewAggFnEvaluator";
 const int DEFAULT_MULTI_DISTINCT_COUNT_STRING_BUFFER_SIZE = 1024;
 
-NewAggFnEvaluator::NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool, MemTracker* tracker, bool is_clone)
-  : _total_mem_consumption(0),
-    _accumulated_mem_consumption(0), 
-    is_clone_(is_clone),
-    agg_fn_(agg_fn),
-    mem_pool_(mem_pool),
-    _mem_tracker(tracker) {
-}
+NewAggFnEvaluator::NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool,
+                                     const std::shared_ptr<MemTracker>& tracker, bool is_clone)
+        : _total_mem_consumption(0),
+          _accumulated_mem_consumption(0),
+          is_clone_(is_clone),
+          agg_fn_(agg_fn),
+          mem_pool_(mem_pool),
+          _mem_tracker(tracker) {}
 
 NewAggFnEvaluator::~NewAggFnEvaluator() {
   if (UNLIKELY(_total_mem_consumption > 0)) {
-      _mem_tracker->release(_total_mem_consumption);
+      _mem_tracker->Release(_total_mem_consumption);
   }
   DCHECK(closed_);
 }
@@ -102,11 +114,12 @@ const TypeDescriptor& NewAggFnEvaluator::intermediate_type() const {
 }
 
 Status NewAggFnEvaluator::Create(const AggFn& agg_fn, RuntimeState* state, ObjectPool* pool,
-                  MemPool* mem_pool, NewAggFnEvaluator** result,
-                  MemTracker* tracker, const RowDescriptor& row_desc) {
-  *result = nullptr;
+                                 MemPool* mem_pool, NewAggFnEvaluator** result,
+                                 const std::shared_ptr<MemTracker>& tracker,
+                                 const RowDescriptor& row_desc) {
+    *result = nullptr;
 
-  // Create a new AggFn evaluator.
+    // Create a new AggFn evaluator.
   NewAggFnEvaluator* agg_fn_eval = pool->add(new NewAggFnEvaluator(agg_fn, mem_pool, tracker, false));
   
   agg_fn_eval->agg_fn_ctx_.reset(FunctionContextImpl::create_context(state, mem_pool,
@@ -147,7 +160,7 @@ Status NewAggFnEvaluator::Create(const AggFn& agg_fn, RuntimeState* state, Objec
   }
 
   *result = agg_fn_eval;
-  return Status::OK;
+  return Status::OK();
 
 cleanup:
   DCHECK(!status.ok());
@@ -156,19 +169,21 @@ cleanup:
 }
 
 Status NewAggFnEvaluator::Create(const vector<AggFn*>& agg_fns, RuntimeState* state,
-    ObjectPool* pool, MemPool* mem_pool, vector<NewAggFnEvaluator*>* evals,
-    MemTracker* tracker, const RowDescriptor& row_desc) {
-  for (const AggFn* agg_fn : agg_fns) {
-    NewAggFnEvaluator* agg_fn_eval;
-    RETURN_IF_ERROR(NewAggFnEvaluator::Create(*agg_fn, state, pool, mem_pool, 
+                                 ObjectPool* pool, MemPool* mem_pool,
+                                 vector<NewAggFnEvaluator*>* evals,
+                                 const std::shared_ptr<MemTracker>& tracker,
+                                 const RowDescriptor& row_desc) {
+    for (const AggFn* agg_fn : agg_fns) {
+        NewAggFnEvaluator* agg_fn_eval;
+        RETURN_IF_ERROR(NewAggFnEvaluator::Create(*agg_fn, state, pool, mem_pool,
                                            &agg_fn_eval, tracker, row_desc));
     evals->push_back(agg_fn_eval);
   }
-  return Status::OK;
+  return Status::OK();
 }
 
 Status NewAggFnEvaluator::Open(RuntimeState* state) {
-  if (opened_) return Status::OK;
+  if (opened_) return Status::OK();
   opened_ = true;
   // TODO chenhao, ScalarFnEvaluator different from ExprContext
   RETURN_IF_ERROR(ExprContext::open(input_evals_, state));
@@ -182,13 +197,13 @@ Status NewAggFnEvaluator::Open(RuntimeState* state) {
         &constant_args[i]));
   }
   agg_fn_ctx_->impl()->set_constant_args(move(constant_args));
-  return Status::OK;
+  return Status::OK();
 }
 
 Status NewAggFnEvaluator::Open(
     const vector<NewAggFnEvaluator*>& evals, RuntimeState* state) {
   for (NewAggFnEvaluator* eval : evals) RETURN_IF_ERROR(eval->Open(state));
-  return Status::OK;
+  return Status::OK();
 }
 
 void NewAggFnEvaluator::Close(RuntimeState* state) {
@@ -253,6 +268,7 @@ void NewAggFnEvaluator::SetDstSlot(const AnyVal* src, const SlotDescriptor& dst_
     case TYPE_CHAR:
     case TYPE_VARCHAR:
     case TYPE_HLL:
+    case TYPE_OBJECT:
       *reinterpret_cast<StringValue*>(slot) =
           StringValue::from_string_val(*reinterpret_cast<const StringVal*>(src));
       return;
@@ -264,6 +280,10 @@ void NewAggFnEvaluator::SetDstSlot(const AnyVal* src, const SlotDescriptor& dst_
     case TYPE_DECIMAL:
         *reinterpret_cast<DecimalValue*>(slot) = DecimalValue::from_decimal_val(
                     *reinterpret_cast<const DecimalVal*>(src));
+        return;
+    case TYPE_DECIMALV2:
+        *reinterpret_cast<PackedInt128*>(slot) =
+            reinterpret_cast<const DecimalV2Val*>(src)->val;
         return;
     default:
       DCHECK(false) << "NYI: " << dst_slot_desc.type();
@@ -350,7 +370,8 @@ inline void NewAggFnEvaluator::set_any_val(
 
     case TYPE_CHAR:
     case TYPE_VARCHAR:
-    case TYPE_HLL: 
+    case TYPE_HLL:
+    case TYPE_OBJECT:
         reinterpret_cast<const StringValue*>(slot)->to_string_val(
                 reinterpret_cast<StringVal*>(dst));
         return;
@@ -364,6 +385,11 @@ inline void NewAggFnEvaluator::set_any_val(
     case TYPE_DECIMAL:
         reinterpret_cast<const DecimalValue*>(slot)->to_decimal_val(
                 reinterpret_cast<DecimalVal*>(dst));
+        return;
+
+    case TYPE_DECIMALV2:
+        reinterpret_cast<DecimalV2Val*>(dst)->val =
+            reinterpret_cast<const PackedInt128*>(slot)->value;
         return;
 
     case TYPE_LARGEINT:
@@ -385,62 +411,145 @@ void NewAggFnEvaluator::Update(const TupleRow* row, Tuple* dst, void* fn) {
       DCHECK(input_evals_[i]->root() == agg_fn_.get_child(i));
       AnyValUtil::set_any_val(src_slot, agg_fn_.get_child(i)->type(), staging_input_vals_[i]);
   }
+  if (agg_fn_.is_merge()) {
+      reinterpret_cast<UpdateFn1>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], staging_intermediate_val_);
+      SetDstSlot(staging_intermediate_val_, slot_desc, dst);
+      return;
+  }
 
   // TODO: this part is not so good and not scalable. It can be replaced with
   // codegen but we can also consider leaving it for the first few cases for
   // debugging.
-    switch (input_evals_.size()) {
-      case 0:
-        reinterpret_cast<UpdateFn0>(fn)(agg_fn_ctx_.get(), staging_intermediate_val_);
-        break;
-      case 1:
-        reinterpret_cast<UpdateFn1>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], staging_intermediate_val_);
-        break;
-      case 2:
-        reinterpret_cast<UpdateFn2>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1], staging_intermediate_val_);
-        break;
-      case 3:
-        reinterpret_cast<UpdateFn3>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], staging_intermediate_val_);
-        break;
-      case 4:
-        reinterpret_cast<UpdateFn4>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], *staging_input_vals_[3], staging_intermediate_val_);
-        break;
-      case 5:
-        reinterpret_cast<UpdateFn5>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], *staging_input_vals_[3],
-            *staging_input_vals_[4], staging_intermediate_val_);
-        break;
-      case 6:
-        reinterpret_cast<UpdateFn6>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], *staging_input_vals_[3],
-            *staging_input_vals_[4], *staging_input_vals_[5], staging_intermediate_val_);
-        break;
-      case 7:
-        reinterpret_cast<UpdateFn7>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], *staging_input_vals_[3],
-            *staging_input_vals_[4], *staging_input_vals_[5],
-            *staging_input_vals_[6], staging_intermediate_val_);
-        break;
-      case 8:
-        reinterpret_cast<UpdateFn8>(fn)(agg_fn_ctx_.get(),
-            *staging_input_vals_[0], *staging_input_vals_[1],
-            *staging_input_vals_[2], *staging_input_vals_[3],
-            *staging_input_vals_[4], *staging_input_vals_[5],
-            *staging_input_vals_[6], *staging_input_vals_[7],
-            staging_intermediate_val_);
-        break;
-      default:
-        DCHECK(false) << "NYI";
-    }
+  if (agg_fn_.get_vararg_start_idx() == -1) {
+      switch (input_evals_.size()) {
+          case 0:
+              reinterpret_cast<UpdateFn0>(fn)(agg_fn_ctx_.get(), staging_intermediate_val_);
+              break;
+          case 1:
+              reinterpret_cast<UpdateFn1>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], staging_intermediate_val_);
+              break;
+          case 2:
+              reinterpret_cast<UpdateFn2>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              staging_intermediate_val_);
+              break;
+          case 3:
+              reinterpret_cast<UpdateFn3>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], staging_intermediate_val_);
+              break;
+          case 4:
+              reinterpret_cast<UpdateFn4>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], *staging_input_vals_[3],
+                                              staging_intermediate_val_);
+              break;
+          case 5:
+              reinterpret_cast<UpdateFn5>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], *staging_input_vals_[3],
+                                              *staging_input_vals_[4], staging_intermediate_val_);
+              break;
+          case 6:
+              reinterpret_cast<UpdateFn6>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], *staging_input_vals_[3],
+                                              *staging_input_vals_[4], *staging_input_vals_[5],
+                                              staging_intermediate_val_);
+              break;
+          case 7:
+              reinterpret_cast<UpdateFn7>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], *staging_input_vals_[3],
+                                              *staging_input_vals_[4], *staging_input_vals_[5],
+                                              *staging_input_vals_[6], staging_intermediate_val_);
+              break;
+          case 8:
+              reinterpret_cast<UpdateFn8>(fn)(agg_fn_ctx_.get(),
+                                              *staging_input_vals_[0], *staging_input_vals_[1],
+                                              *staging_input_vals_[2], *staging_input_vals_[3],
+                                              *staging_input_vals_[4], *staging_input_vals_[5],
+                                              *staging_input_vals_[6], *staging_input_vals_[7],
+                                              staging_intermediate_val_);
+              break;
+          default:
+              DCHECK(false) << "NYI";
+      }
+  } else {
+      int num_varargs = input_evals_.size() - agg_fn_.get_vararg_start_idx();
+      const AnyVal* varargs = *(staging_input_vals_.data() + agg_fn_.get_vararg_start_idx());
+      switch (agg_fn_.get_vararg_start_idx()) {
+          case 0:
+              reinterpret_cast<VarargUpdateFn0>(fn)(agg_fn_ctx_.get(),
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 1:
+              reinterpret_cast<VarargUpdateFn1>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 2:
+              reinterpret_cast<VarargUpdateFn2>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 3:
+              reinterpret_cast<VarargUpdateFn3>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 4:
+              reinterpret_cast<VarargUpdateFn4>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2], *staging_input_vals_[3],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 5:
+              reinterpret_cast<VarargUpdateFn5>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2], *staging_input_vals_[3],
+                                                    *staging_input_vals_[4],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 6:
+              reinterpret_cast<VarargUpdateFn6>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2], *staging_input_vals_[3],
+                                                    *staging_input_vals_[4], *staging_input_vals_[5],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 7:
+              reinterpret_cast<VarargUpdateFn7>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2], *staging_input_vals_[3],
+                                                    *staging_input_vals_[4], *staging_input_vals_[5],
+                                                    *staging_input_vals_[6],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          case 8:
+              reinterpret_cast<VarargUpdateFn8>(fn)(agg_fn_ctx_.get(),
+                                                    *staging_input_vals_[0], *staging_input_vals_[1],
+                                                    *staging_input_vals_[2], *staging_input_vals_[3],
+                                                    *staging_input_vals_[4], *staging_input_vals_[5],
+                                                    *staging_input_vals_[6], *staging_input_vals_[7],
+                                                    num_varargs, varargs,
+                                                    staging_intermediate_val_);
+              break;
+          default:
+              DCHECK(false) << "NYI";
+      }
+  }
   SetDstSlot(staging_intermediate_val_, slot_desc, dst);
 }
 
@@ -535,7 +644,8 @@ void NewAggFnEvaluator::SerializeOrFinalize(Tuple* src,
     }
     case TYPE_CHAR:
     case TYPE_VARCHAR:
-    case TYPE_HLL:{
+    case TYPE_HLL:
+    case TYPE_OBJECT: {
       typedef StringVal(*Fn)(FunctionContext*, AnyVal*);
       StringVal v = reinterpret_cast<Fn>(fn)(
           agg_fn_ctx_.get(), staging_intermediate_val_);
@@ -545,6 +655,13 @@ void NewAggFnEvaluator::SerializeOrFinalize(Tuple* src,
     case TYPE_DECIMAL: {
       typedef DecimalVal(*Fn)(FunctionContext*, AnyVal*);
       DecimalVal v = reinterpret_cast<Fn>(fn)(
+          agg_fn_ctx_.get(), staging_intermediate_val_);
+      SetDstSlot(&v, dst_slot_desc, dst);
+      break;
+    }
+    case TYPE_DECIMALV2: {
+      typedef DecimalV2Val(*Fn)(FunctionContext*, AnyVal*);
+      DecimalV2Val v = reinterpret_cast<Fn>(fn)(
           agg_fn_ctx_.get(), staging_intermediate_val_);
       SetDstSlot(&v, dst_slot_desc, dst);
       break;

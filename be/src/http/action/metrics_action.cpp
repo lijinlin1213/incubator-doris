@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -15,6 +17,10 @@
 
 #include "http/action/metrics_action.h"
 
+#include <rapidjson/rapidjson.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
 #include <string>
 
 #include "http/http_request.h"
@@ -24,72 +30,22 @@
 #include "runtime/exec_env.h"
 #include "util/metrics.h"
 
-namespace palo {
-
-class PrometheusMetricsVisitor : public MetricsVisitor {
-public:
-    virtual ~PrometheusMetricsVisitor() {}
-    void visit(const std::string& prefix, const std::string& name,
-               MetricCollector* collector) override;
-    std::string to_string() const { return _ss.str(); }
-private:
-    void _visit_simple_metric(
-        const std::string& name, const MetricLabels& labels, SimpleMetric* metric);
-private:
-    std::stringstream _ss;
-};
-
-void PrometheusMetricsVisitor::visit(const std::string& prefix,
-                                     const std::string& name,
-                                     MetricCollector* collector) {
-    if (collector->empty() || name.empty()) {
-        return;
-    }
-    std::string metric_name;
-    if (prefix.empty()) {
-        metric_name = name;
-    } else {
-        metric_name = prefix + "_" + name;
-    }
-    // Output metric type
-    _ss << "# TYPE " << metric_name << " " << collector->type() << "\n";
-    switch (collector->type()) {
-    case MetricType::COUNTER:
-    case MetricType::GAUGE:
-        for (auto& it : collector->metrics()) {
-            _visit_simple_metric(metric_name, it.first, (SimpleMetric*)it.second);
-        }
-        break;
-    default:
-        break;
-    }
-}
-
-void PrometheusMetricsVisitor::_visit_simple_metric(
-        const std::string& name, const MetricLabels& labels, SimpleMetric* metric) {
-    _ss << name;
-    // labels
-    if (!labels.empty()) {
-        _ss << "{";
-        int i = 0;
-        for (auto& label : labels.labels) {
-            if (i++ > 0) {
-                _ss << ",";
-            }
-            _ss << label.name << "=\"" << label.value << "\"";
-        }
-        _ss << "}";
-    }
-    _ss << " " << metric->to_string() << "\n";
-}
+namespace doris {
 
 void MetricsAction::handle(HttpRequest* req) {
-    PrometheusMetricsVisitor visitor;
-    _metrics->collect(&visitor);
-    std::string str = visitor.to_string();
+    const std::string& type = req->param("type");
+    const std::string& with_tablet = req->param("with_tablet");
+    std::string str;
+    if (type == "core") {
+        str = _metric_registry->to_core_string();
+    } else if (type == "json") {
+        str = _metric_registry->to_json(with_tablet == "true");
+    } else {
+        str = _metric_registry->to_prometheus(with_tablet == "true");
+    }
 
     req->add_output_header(HttpHeaders::CONTENT_TYPE, "text/plain; version=0.0.4");
     HttpChannel::send_reply(req, str);
 }
 
-}
+} // namespace doris

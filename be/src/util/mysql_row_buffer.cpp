@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -27,7 +24,7 @@
 #include "gutil/strings/numbers.h"
 #include "util/mysql_global.h"
 
-namespace palo {
+namespace doris {
 
 // the first byte:
 // <= 250: length
@@ -108,7 +105,7 @@ int MysqlRowBuffer::push_tinyint(int8_t data) {
     int ret = reserve(3 + MAX_TINYINT_WIDTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -129,7 +126,7 @@ int MysqlRowBuffer::push_smallint(int16_t data) {
     int ret = reserve(3 + MAX_SMALLINT_WIDTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -150,7 +147,7 @@ int MysqlRowBuffer::push_int(int32_t data) {
     int ret = reserve(3 + MAX_INT_WIDTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -171,7 +168,7 @@ int MysqlRowBuffer::push_bigint(int64_t data) {
     int ret = reserve(3 + MAX_BIGINT_WIDTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -192,7 +189,7 @@ int MysqlRowBuffer::push_unsigned_bigint(uint64_t data) {
     int ret = reserve(4 + MAX_BIGINT_WIDTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -213,7 +210,7 @@ int MysqlRowBuffer::push_float(float data) {
     int ret = reserve(3 + MAX_FLOAT_STR_LENGTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -234,7 +231,7 @@ int MysqlRowBuffer::push_double(double data) {
     int ret = reserve(3 + MAX_DOUBLE_STR_LENGTH);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -260,7 +257,7 @@ int MysqlRowBuffer::push_string(const char* str, int length) {
     int ret = reserve(9 + length);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -274,7 +271,7 @@ int MysqlRowBuffer::push_null() {
     int ret = reserve(1);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return ret;
     }
 
@@ -287,7 +284,7 @@ char* MysqlRowBuffer::reserved(int size) {
     int ret = reserve(size);
 
     if (0 != ret) {
-        LOG(ERROR) << "mysql row buffer reserver failed.";
+        LOG(ERROR) << "mysql row buffer reserve failed.";
         return NULL;
     }
 

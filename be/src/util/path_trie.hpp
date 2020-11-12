@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace palo {
+namespace doris {
 
 // This tree is usd for manage restful api path.
 template<class T>
@@ -75,7 +72,7 @@ public:
             }
         }
 
-        // Return true if insert sucess.
+        // Return true if insert success.
         bool insert(const std::vector<std::string> path, int index, const T& value) {
             if (index >= path.size()) {
                 return false;

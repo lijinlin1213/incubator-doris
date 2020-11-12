@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -18,22 +20,21 @@
 
 #include "olap/olap_cond.h"
 #include "olap/olap_define.h"
-#include "olap/olap_engine.h"
-#include "olap/olap_header.h"
-#include "olap/olap_table.h"
+#include "olap/storage_engine.h"
+#include "olap/tablet_meta.h"
+#include "olap/tablet.h"
 #include "olap/olap_common.h"
 #include "olap/row_cursor.h"
 #include "olap/wrapper_field.h"
-#include "olap/column_file/stream_index_common.h"
-#include "olap/column_file/stream_index_writer.h"
-#include "olap/column_file/stream_index_reader.h"
-#include "olap/column_file/file_stream.h"
+#include "olap/stream_index_common.h"
+#include "olap/stream_index_writer.h"
+#include "olap/stream_index_reader.h"
+#include "olap/file_stream.h"
 #include "util/logging.h"
 
 using namespace std;
 
-namespace palo {
-namespace column_file {
+namespace doris {
 
 class TestStreamIndex : public testing::Test {
 public:
@@ -89,6 +90,7 @@ TEST_F(TestStreamIndex, index_write) {
         ASSERT_EQ(e.positions(1), i * 2);
         ASSERT_EQ(e.positions(2), i * 3);
     }
+    delete[] buffer;
 }
 
 TEST_F(TestStreamIndex, remove_written_position) {
@@ -137,6 +139,7 @@ TEST_F(TestStreamIndex, remove_written_position) {
             ASSERT_EQ(e.positions(1), i * 6);
             ASSERT_EQ(e.positions(2), i * 7);
         }
+        delete[] buffer;
     }
     writer.reset();
 
@@ -181,6 +184,7 @@ TEST_F(TestStreamIndex, remove_written_position) {
             ASSERT_EQ(e.positions(3), i * 6);
             ASSERT_EQ(e.positions(4), i * 7);
         }
+        delete[] buffer;
     }
     writer.reset();
     // test 3
@@ -224,6 +228,7 @@ TEST_F(TestStreamIndex, remove_written_position) {
             ASSERT_EQ(e.positions(3), i * 6);
             ASSERT_EQ(e.positions(4), i * 7);
         }
+        delete[] buffer;
     }
     writer.reset();
     // test 4
@@ -266,6 +271,7 @@ TEST_F(TestStreamIndex, remove_written_position) {
             ASSERT_EQ(e.positions(2), i * 3);
             ASSERT_EQ(e.positions(3 ), i * 4);
         }
+        delete[] buffer;
     }
     writer.reset();
 }
@@ -282,25 +288,25 @@ TEST_F(TestStreamIndex, test_statistic) {
 
     // 1 
     field->from_string("3");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     ASSERT_STREQ(stat.minimum()->to_string().c_str(), "3");
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "3");
 
     // 2
     field->from_string("5");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     ASSERT_STREQ(stat.minimum()->to_string().c_str(), "3");
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "5");
 
     // 3
     field->from_string("899");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     ASSERT_STREQ(stat.minimum()->to_string().c_str(), "3");
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "899");
 
     // 4
     field->from_string("-111");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     ASSERT_STREQ(stat.minimum()->to_string().c_str(), "-111");
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "899");
 
@@ -310,9 +316,9 @@ TEST_F(TestStreamIndex, test_statistic) {
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "-2147483648");
 
     field->from_string("3");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     field->from_string("6");
-    stat.add(field->field_ptr());
+    stat.add(*field);
     ASSERT_STREQ(stat.minimum()->to_string().c_str(), "3");
     ASSERT_STREQ(stat.maximum()->to_string().c_str(), "6");
 
@@ -325,6 +331,7 @@ TEST_F(TestStreamIndex, test_statistic) {
 
     ASSERT_STREQ(stat2.minimum()->to_string().c_str(), "3");
     ASSERT_STREQ(stat2.maximum()->to_string().c_str(), "6");
+    delete field;
 }
 
 TEST_F(TestStreamIndex, statistic) {
@@ -347,11 +354,11 @@ TEST_F(TestStreamIndex, statistic) {
 
         snprintf(string_buffer, sizeof(string_buffer), "%d", i * 9);
         field->from_string(string_buffer);
-        stat.add(field->field_ptr());
+        stat.add(*field);
 
         snprintf(string_buffer, sizeof(string_buffer), "%d", i * 2);
         field->from_string(string_buffer);
-        stat.add(field->field_ptr());
+        stat.add(*field);
 
         entry.set_statistic(&stat);
 
@@ -379,19 +386,20 @@ TEST_F(TestStreamIndex, statistic) {
         ASSERT_EQ(e.positions(1), i * 2);
         ASSERT_EQ(e.positions(2), i * 3);
     }
+    delete[] buffer;
+    delete field;
 }
 
-}
 }
 
 int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("PALO_HOME")) + "/conf/be.conf";
-    if (!palo::config::init(conffile.c_str(), false)) {
+    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
+    if (!doris::config::init(conffile.c_str(), false)) {
         fprintf(stderr, "error read config file. \n");
         return -1;
     }
-    palo::init_glog("be-test");
-    int ret = palo::OLAP_SUCCESS;
+    doris::init_glog("be-test");
+    int ret = doris::OLAP_SUCCESS;
     testing::InitGoogleTest(&argc, argv);
     ret = RUN_ALL_TESTS();
     google::protobuf::ShutdownProtobufLibrary();

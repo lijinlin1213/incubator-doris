@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -28,7 +25,7 @@
 #include "common/names.h"
 #include "gutil/strings/substitute.h"
 
-namespace palo {
+namespace doris {
 
 constexpr int Suballocator::LOG_MAX_ALLOCATION_BYTES;
 constexpr int64_t Suballocator::MAX_ALLOCATION_BYTES;
@@ -55,7 +52,7 @@ Status Suballocator::Allocate(int64_t bytes, unique_ptr<Suballocation>* result) 
     err_stream << "Requested memory allocation of "  << bytes
                << " bytes, larger than max " << "supported of " << MAX_ALLOCATION_BYTES
                << " bytes";
-    return Status(err_stream.str());
+    return Status::InternalError(err_stream.str());
   }
   unique_ptr<Suballocation> free_node;
   bytes = max(bytes, MIN_ALLOCATION_BYTES);
@@ -70,7 +67,7 @@ Status Suballocator::Allocate(int64_t bytes, unique_ptr<Suballocation>* result) 
     RETURN_IF_ERROR(AllocateBuffer(bytes, &free_node));
     if (free_node == nullptr) {
       *result = nullptr;
-      return Status::OK;
+      return Status::OK();
     }
   }
 
@@ -84,11 +81,20 @@ Status Suballocator::Allocate(int64_t bytes, unique_ptr<Suballocation>* result) 
   free_node->in_use_ = true;
   allocated_ += free_node->len_;
   *result = move(free_node);
-  return Status::OK;
+  return Status::OK();
 }
 
 int Suballocator::ComputeListIndex(int64_t bytes) const {
   return BitUtil::Log2CeilingNonZero64(bytes) - LOG_MIN_ALLOCATION_BYTES;
+}
+
+uint64_t Suballocator::ComputeAllocateBufferSize(int64_t bytes) const {
+    bytes = max(bytes, MIN_ALLOCATION_BYTES);
+    const int target_list_idx = ComputeListIndex(bytes);
+    for (int i = target_list_idx; i < NUM_FREE_LISTS; ++i) {
+        if (CheckFreeListHeadNotNull(i)) return 0;
+    }
+    return max(min_buffer_len_, BitUtil::RoundUpToPowerOfTwo(bytes));
 }
 
 Status Suballocator::AllocateBuffer(int64_t bytes, unique_ptr<Suballocation>* result) {
@@ -96,7 +102,7 @@ Status Suballocator::AllocateBuffer(int64_t bytes, unique_ptr<Suballocation>* re
   const int64_t buffer_len = max(min_buffer_len_, BitUtil::RoundUpToPowerOfTwo(bytes));
   if (!client_->IncreaseReservationToFit(buffer_len)) {
     *result = nullptr;
-    return Status::OK;
+    return Status::OK();
   }
 
   unique_ptr<Suballocation> free_node;
@@ -106,7 +112,7 @@ Status Suballocator::AllocateBuffer(int64_t bytes, unique_ptr<Suballocation>* re
   free_node->data_ = free_node->buffer_.data();
   free_node->len_ = buffer_len;
   *result = move(free_node);
-  return Status::OK;
+  return Status::OK();
 }
 
 Status Suballocator::SplitToSize(unique_ptr<Suballocation> free_node,
@@ -127,7 +133,7 @@ Status Suballocator::SplitToSize(unique_ptr<Suballocation> free_node,
       // Add the free node to the free list to restore the allocator to an internally
       // consistent state.
       AddToFreeList(move(free_node));
-      return Status("Failed to allocate list node in Suballocator");
+      return Status::InternalError("Failed to allocate list node in Suballocator");
     }
   }
 
@@ -153,11 +159,11 @@ Status Suballocator::SplitToSize(unique_ptr<Suballocation> free_node,
     free_node = move(left_child);
   }
   *result = move(free_node);
-  return Status::OK;
+  return Status::OK();
 }
 
-void Suballocator::Free(unique_ptr<Suballocation> allocation) {
-  if (allocation == nullptr) return;
+uint64_t Suballocator::Free(unique_ptr<Suballocation> allocation) {
+  if (allocation == nullptr) return 0;
 
   DCHECK(allocation->in_use_);
   allocation->in_use_ = false;
@@ -171,7 +177,7 @@ void Suballocator::Free(unique_ptr<Suballocation> allocation) {
     if (curr_allocation->buddy_->in_use_) {
       // If the buddy is not free we can't coalesce, just add it to free list.
       AddToFreeList(move(curr_allocation));
-      return;
+      return 0;
     }
     unique_ptr<Suballocation> buddy = RemoveFromFreeList(curr_allocation->buddy_);
     curr_allocation = CoalesceBuddies(move(curr_allocation), move(buddy));
@@ -179,8 +185,10 @@ void Suballocator::Free(unique_ptr<Suballocation> allocation) {
 
   // Reached root, which is an entire free buffer. We are not using it, so free up memory.
   DCHECK(curr_allocation->buffer_.is_open());
+  auto free_len = curr_allocation->buffer_.len();
   pool_->FreeBuffer(client_, &curr_allocation->buffer_);
   curr_allocation.reset();
+  return free_len;
 }
 
 void Suballocator::AddToFreeList(unique_ptr<Suballocation> node) {
@@ -222,6 +230,10 @@ unique_ptr<Suballocation> Suballocator::PopFreeListHead(int list_idx) {
   return result;
 }
 
+bool Suballocator::CheckFreeListHeadNotNull(int list_idx) const {
+    return free_lists_[list_idx] != nullptr;
+}
+
 unique_ptr<Suballocation> Suballocator::CoalesceBuddies(
     unique_ptr<Suballocation> b1, unique_ptr<Suballocation> b2) {
   DCHECK(!b1->in_use_);
@@ -242,8 +254,8 @@ Status Suballocation::Create(unique_ptr<Suballocation>* new_suballocation) {
   // overhead of these allocations might be a consideration.
   new_suballocation->reset(new (nothrow) Suballocation());
   if (*new_suballocation == nullptr) {
-    return Status(TStatusCode::MEM_ALLOC_FAILED);
+    return Status::MemoryAllocFailed("allocate memory failed");
   }
-  return Status::OK;
+  return Status::OK();
 }
 }

@@ -17,11 +17,19 @@
 #include "olap/olap_index.h"
 #include "olap/row_block.h"
 #include "olap/utils.h"
+#include "util/doris_metrics.h"
 
 using std::string;
 using std::stringstream;
 
-namespace palo {
+namespace doris {
+
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(usage, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(usage_ratio, MetricUnit::NOUNIT);
+DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(lookup_count, MetricUnit::OPERATIONS);
+DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(hit_count, MetricUnit::OPERATIONS);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(hit_ratio, MetricUnit::NOUNIT);
 
 uint32_t CacheKey::hash(const char* data, size_t n, uint32_t seed) const {
     // Similar to murmur hash
@@ -65,26 +73,30 @@ uint32_t CacheKey::hash(const char* data, size_t n, uint32_t seed) const {
 Cache::~Cache() {
 }
 
+HandleTable::~HandleTable() {
+    for (uint32_t i = 0; i < _length; i++) {
+        delete _list[i];
+    }
+    delete[] _list;
+}
+
 // LRU cache implementation
 LRUHandle* HandleTable::lookup(const CacheKey& key, uint32_t hash) {
     return *_find_pointer(key, hash);
 }
 
 LRUHandle* HandleTable::insert(LRUHandle* h) {
-    LRUHandle** ptr = _find_pointer(h->key(), h->hash);
-    LRUHandle* old = *ptr;
-    h->next_hash = (old == NULL ? NULL : old->next_hash);
-    *ptr = h;
+    LRUHandle* old = remove(h->key(), h->hash);
+    LRUHandle* head = _list[h->hash & (_length - 1)];
+
+    _head_insert(head, h);
+    ++_elems;
 
     if (old == NULL) {
-        ++_elems;
-
         if (_elems > _length) {
             // Since each cache entry is fairly large, we aim for a small
             // average linked list length (<= 1).
-            if (!_resize()) {
-                return NULL;
-            }
+            _resize();
         }
     }
 
@@ -95,17 +107,24 @@ LRUHandle* HandleTable::remove(const CacheKey& key, uint32_t hash) {
     LRUHandle** ptr = _find_pointer(key, hash);
     LRUHandle* result = *ptr;
 
-    if (result != NULL) {
-        *ptr = result->next_hash;
-        --_elems;
-    }
+    remove(result);
 
     return result;
 }
 
-LRUHandle** HandleTable::_find_pointer(const CacheKey& key, uint32_t hash) {
-    LRUHandle** ptr = &_list[hash & (_length - 1)];
+void HandleTable::remove(const LRUHandle* h) {
+    if (h != nullptr) {
+        if (h->next_hash != nullptr) {
+            h->next_hash->prev_hash = h->prev_hash;
+        }
+        DCHECK(h->prev_hash != nullptr);
+        h->prev_hash->next_hash = h->next_hash;
+        --_elems;
+    }
+}
 
+LRUHandle** HandleTable::_find_pointer(const CacheKey& key, uint32_t hash) {
+    LRUHandle** ptr = &(_list[hash & (_length - 1)]->next_hash);
     while (*ptr != NULL &&
             ((*ptr)->hash != hash || key != (*ptr)->key())) {
         ptr = &(*ptr)->next_hash;
@@ -114,102 +133,71 @@ LRUHandle** HandleTable::_find_pointer(const CacheKey& key, uint32_t hash) {
     return ptr;
 }
 
-bool HandleTable::_resize() {
-    uint32_t new_length = 4;
+void HandleTable::_head_insert(LRUHandle* head, LRUHandle* handle) {
+    handle->next_hash = head->next_hash;
+    if (handle->next_hash != nullptr) {
+        handle->next_hash->prev_hash = handle;
+    }
+    handle->prev_hash = head;
+    head->next_hash = handle;
+}
 
-    while (new_length < _elems) {
+void HandleTable::_resize() {
+    uint32_t new_length = 16;
+    while (new_length < _elems * 1.5) {
         new_length *= 2;
     }
 
     LRUHandle** new_list = new(std::nothrow) LRUHandle*[new_length];
-
-    // assert(new_list);
-    if (NULL == new_list) {
-        OLAP_LOG_FATAL("failed to malloc new hash list. [new_length=%d]", new_length);
-        return false;
+    memset(new_list, 0, sizeof(new_list[0]) * new_length);
+    for (uint32_t i = 0; i < new_length; i++) {
+        // The first node in the linked-list is a dummy node used for
+        // inserting new node mainly.
+        new_list[i] = new LRUHandle();
     }
 
-    memset(new_list, 0, sizeof(new_list[0]) * new_length);
     uint32_t count = 0;
-
     for (uint32_t i = 0; i < _length; i++) {
-        LRUHandle* h = _list[i];
-
+        LRUHandle* h = _list[i]->next_hash;
         while (h != NULL) {
             LRUHandle* next = h->next_hash;
-            CacheKey key = h->key();
             uint32_t hash = h->hash;
-            LRUHandle** ptr = &new_list[hash & (new_length - 1)];
-            h->next_hash = *ptr;
-            *ptr = h;
+            LRUHandle* head = new_list[hash & (new_length - 1)];
+            _head_insert(head, h);
             h = next;
             count++;
         }
     }
 
-    //assert(_elems == count);
-    if (_elems != count) {
-        delete [] new_list;
-        OLAP_LOG_FATAL("_elems not match new count. [_elems=%d count=%d]", _elems, count);
-        return false;
+    DCHECK_EQ(_elems, count);
+    for (uint32_t i = 0; i < _length; i++) {
+        delete _list[i];
     }
-
     delete [] _list;
     _list = new_list;
     _length = new_length;
-    return true;
 }
 
-LRUCache::LRUCache() : _usage(0), _last_id(0), _lookup_count(0),
-    _hit_count(0) {
-        // Make empty circular linked list
-        _lru.next = &_lru;
-        _lru.prev = &_lru;
-        _in_use.next = &_in_use;
-        _in_use.prev = &_in_use;
-    }
+LRUCache::LRUCache() {
+    // Make empty circular linked list
+    _lru.next = &_lru;
+    _lru.prev = &_lru;
+}
 
 LRUCache::~LRUCache() {
-    assert(_in_use.next == &_in_use);  // Error if caller has an unreleased handle
-    for (LRUHandle* e = _lru.next; e != &_lru;) {
-        LRUHandle* next = e->next;
-        assert(e->in_cache);
-        e->in_cache = false;
-        assert(e->refs == 1);  // Invariant of _lru list.
-        _unref(e);
-        e = next;
-    }
+    prune();
 }
 
-void LRUCache::_ref(LRUHandle* e) {
-    if (e->refs == 1 && e->in_cache) {  // If on _lru list, move to _in_use list.
-        _lru_remove(e);
-        _lru_append(&_in_use, e);
-    }
-    e->refs++;
-}
-
-void LRUCache::_unref(LRUHandle* e) {
-    // assert(e->refs > 0);
-    if (e->refs <= 0) {
-        OLAP_LOG_FATAL("e->refs > 0, i do not know why, anyway, is something wrong."
-                "[e->refs=%d]", e->refs);
-        return;
-    }
+bool LRUCache::_unref(LRUHandle* e) {
+    DCHECK(e->refs > 0);
     e->refs--;
-    if (e->refs == 0) { // Deallocate.
-        assert(!e->in_cache);
-        (*e->deleter)(e->key(), e->value);
-        free(e);
-    } else if (e->in_cache && e->refs == 1) {  // No longer in use; move to lru_ list.
-        _lru_remove(e);
-        _lru_append(&_lru, e);
-    }
+    return e->refs == 0;
 }
 
 void LRUCache::_lru_remove(LRUHandle* e) {
     e->next->prev = e->prev;
     e->prev->next = e->next;
+    e->prev = e->next = nullptr;
 }
 
 void LRUCache::_lru_append(LRUHandle* list, LRUHandle* e) {
@@ -221,90 +209,191 @@ void LRUCache::_lru_append(LRUHandle* list, LRUHandle* e) {
 }
 
 Cache::Handle* LRUCache::lookup(const CacheKey& key, uint32_t hash) {
-    AutoMutexLock l(&_mutex);
+    MutexLock l(&_mutex);
     ++_lookup_count;
     LRUHandle* e = _table.lookup(key, hash);
-
-    if (e != NULL) {
+    if (e != nullptr) {
+        // we get it from _table, so in_cache must be true
+        DCHECK(e->in_cache);
+        if (e->refs == 1) {
+            // only in LRU free list, remove it from list
+            _lru_remove(e);
+        }
+        e->refs++;
         ++_hit_count;
-        _ref(e);
     }
-
     return reinterpret_cast<Cache::Handle*>(e);
 }
 
 void LRUCache::release(Cache::Handle* handle) {
-    AutoMutexLock l(&_mutex);
-    _unref(reinterpret_cast<LRUHandle*>(handle));
+    if (handle == nullptr) {
+        return;
+    }
+    LRUHandle* e = reinterpret_cast<LRUHandle*>(handle);
+    bool last_ref = false;
+    {
+        MutexLock l(&_mutex);
+        last_ref = _unref(e);
+        if (last_ref) {
+            _usage -= e->charge;
+        } else if (e->in_cache && e->refs == 1) {
+            // only exists in cache
+            if (_usage > _capacity) {
+                // take this opportunity and remove the item
+                _table.remove(e);
+                e->in_cache = false;
+                _unref(e);
+                _usage -= e->charge;
+                last_ref = true;
+            } else {
+                // put it to LRU free list
+                _lru_append(&_lru, e);
+            }
+        }
+    }
+
+    // free handle out of mutex
+    if (last_ref) {
+        e->free();
+    }
+}
+
+void LRUCache::_evict_from_lru(size_t charge, LRUHandle** to_remove_head) {
+    LRUHandle* cur = &_lru;
+    // 1. evict normal cache entries
+    while (_usage + charge > _capacity && cur->next != &_lru) {
+        LRUHandle* old = cur->next;
+        if (old->priority == CachePriority::DURABLE) {
+            cur = cur->next;
+            continue;
+        }
+        _evict_one_entry(old);
+        old->next = *to_remove_head;
+        *to_remove_head = old;
+    }
+    // 2. evict durable cache entries if need
+    while (_usage + charge > _capacity && _lru.next != &_lru) {
+        LRUHandle* old = _lru.next;
+        DCHECK(old->priority == CachePriority::DURABLE);
+        _evict_one_entry(old);
+        old->next = *to_remove_head;
+        *to_remove_head = old;
+    }
+}
+
+void LRUCache::_evict_one_entry(LRUHandle* e) {
+    DCHECK(e->in_cache);
+    DCHECK(e->refs == 1); // LRU list contains elements which may be evicted
+    _lru_remove(e);
+    _table.remove(e);
+    e->in_cache = false;
+    _unref(e);
+    _usage -= e->charge;
 }
 
 Cache::Handle* LRUCache::insert(
         const CacheKey& key, uint32_t hash, void* value, size_t charge,
-        void (*deleter)(const CacheKey& key, void* value)) {
-    AutoMutexLock l(&_mutex);
+        void (*deleter)(const CacheKey& key, void* value),
+        CachePriority priority) {
 
     LRUHandle* e = reinterpret_cast<LRUHandle*>(
-            malloc(sizeof(LRUHandle)-1 + key.size()));
+            malloc(sizeof(LRUHandle) - 1 + key.size()));
     e->value = value;
     e->deleter = deleter;
     e->charge = charge;
     e->key_length = key.size();
     e->hash = hash;
-    e->in_cache = false;
-    e->refs = 1;  // for the returned handle.
+    e->refs = 2;  // one for the returned handle, one for LRUCache.
+    e->next = e->prev = nullptr;
+    e->in_cache = true;
+    e->priority = priority;
     memcpy(e->key_data, key.data(), key.size());
+    LRUHandle* to_remove_head = nullptr;
+    {
+        MutexLock l(&_mutex);
 
-    if (_capacity > 0) {
-        e->refs++;  // for the cache's reference.
-        e->in_cache = true;
-        _lru_append(&_in_use, e);
+        // Free the space following strict LRU policy until enough space
+        // is freed or the lru list is empty
+        _evict_from_lru(charge, &to_remove_head);
+
+        // insert into the cache
+        // note that the cache might get larger than its capacity if not enough
+        // space was freed
+        auto old = _table.insert(e);
         _usage += charge;
-        _finish_erase(_table.insert(e));
-    } // else don't cache.  (Tests use capacity_==0 to turn off caching.)
-
-    while (_usage > _capacity && _lru.next != &_lru) {
-        LRUHandle* old = _lru.next;
-        assert(old->refs == 1);
-        bool erased = _finish_erase(_table.remove(old->key(), old->hash));
-        if (!erased) {  // to avoid unused variable when compiled NDEBUG
-            assert(erased);
+        if (old != nullptr) {
+            old->in_cache = false;
+            if (_unref(old)) {
+                _usage -= old->charge;
+                // old is on LRU because it's in cache and its reference count
+                // was just 1 (Unref returned 0)
+                _lru_remove(old);
+                old->next = to_remove_head;
+                to_remove_head = old;
+            }
         }
+    }
+
+    // we free the entries here outside of mutex for
+    // performance reasons
+    while (to_remove_head != nullptr) {
+        LRUHandle* next = to_remove_head->next;
+        to_remove_head->free();
+        to_remove_head = next;
     }
 
     return reinterpret_cast<Cache::Handle*>(e);
 }
 
-// If e != NULL, finish removing *e from the cache; it has already been removed
-// from the hash table.  Return whether e != NULL.  Requires mutex_ held.
-bool LRUCache::_finish_erase(LRUHandle* e) {
-    if (e != NULL) {
-        assert(e->in_cache);
-        _lru_remove(e);
-        e->in_cache = false;
-        _usage -= e->charge;
-        _unref(e);
-    }
-    return e != NULL;
-}
-
 void LRUCache::erase(const CacheKey& key, uint32_t hash) {
-    AutoMutexLock l(&_mutex);
-    _finish_erase(_table.remove(key, hash));
+    LRUHandle* e = nullptr;
+    bool last_ref = false;
+    {
+        MutexLock l(&_mutex);
+        e = _table.remove(key, hash);
+        if (e != nullptr) {
+            last_ref = _unref(e);
+            if (last_ref) {
+                _usage -= e->charge;
+                if (e->in_cache) {
+                    // locate in free list
+                    _lru_remove(e);
+                }
+            }
+            e->in_cache = false;
+        }
+    }
+    // free handle out of mutex, when last_ref is true, e must not be nullptr
+    if (last_ref) {
+        e->free();
+    }
 }
 
 int LRUCache::prune() {
-    AutoMutexLock l(&_mutex);
-    int num_prune = 0;
-    while (_lru.next != &_lru) {
-        LRUHandle* e = _lru.next;
-        assert(e->refs == 1);
-        bool erased = _finish_erase(_table.remove(e->key(), e->hash));
-        if (!erased) {  // to avoid unused variable when compiled NDEBUG
-            assert(erased);
+    LRUHandle* to_remove_head = nullptr;
+    {
+        MutexLock l(&_mutex);
+        while (_lru.next != &_lru) {
+            LRUHandle* old = _lru.next;
+            DCHECK(old->in_cache);
+            DCHECK(old->refs == 1);  // LRU list contains elements which may be evicted
+            _lru_remove(old);
+            _table.remove(old);
+            old->in_cache = false;
+            _unref(old);
+            _usage -= old->charge;
+            old->next = to_remove_head;
+            to_remove_head = old;
         }
-        num_prune++;
     }
-    return num_prune;
+    int pruned_count = 0;
+    while (to_remove_head != nullptr) {
+        ++pruned_count;
+        LRUHandle* next = to_remove_head->next;
+        to_remove_head->free();
+        to_remove_head = next;
+    }
+    return pruned_count;
 }
 
 inline uint32_t ShardedLRUCache::_hash_slice(const CacheKey& s) {
@@ -315,22 +404,37 @@ uint32_t ShardedLRUCache::_shard(uint32_t hash) {
     return hash >> (32 - kNumShardBits);
 }
 
-ShardedLRUCache::ShardedLRUCache(size_t capacity)
-    : _last_id(0) {
-        const size_t per_shard = (capacity + (kNumShards - 1)) / kNumShards;
-
-        for (int s = 0; s < kNumShards; s++) {
-            _shards[s].set_capacity(per_shard);
-        }
+ShardedLRUCache::ShardedLRUCache(const std::string& name, size_t total_capacity)
+    : _name(name), _last_id(1) {
+    const size_t per_shard = (total_capacity + (kNumShards - 1)) / kNumShards;
+    for (int s = 0; s < kNumShards; s++) {
+        _shards[s].set_capacity(per_shard);
     }
+
+    _entity = DorisMetrics::instance()->metric_registry()
+        ->register_entity(std::string("lru_cache:") + name, {{"name", name}});
+    _entity->register_hook(name, std::bind(&ShardedLRUCache::update_cache_metrics, this));
+    INT_GAUGE_METRIC_REGISTER(_entity, capacity);
+    INT_GAUGE_METRIC_REGISTER(_entity, usage);
+    INT_DOUBLE_METRIC_REGISTER(_entity, usage_ratio);
+    INT_ATOMIC_COUNTER_METRIC_REGISTER(_entity, lookup_count);
+    INT_ATOMIC_COUNTER_METRIC_REGISTER(_entity, hit_count);
+    INT_DOUBLE_METRIC_REGISTER(_entity, hit_ratio);
+}
+
+ShardedLRUCache::~ShardedLRUCache() {
+    _entity->deregister_hook(_name);
+    DorisMetrics::instance()->metric_registry()->deregister_entity(_entity);
+}
 
 Cache::Handle* ShardedLRUCache::insert(
         const CacheKey& key,
         void* value,
         size_t charge,
-        void (*deleter)(const CacheKey& key, void* value)) {
+        void (*deleter)(const CacheKey& key, void* value),
+        CachePriority priority) {
     const uint32_t hash = _hash_slice(key);
-    return _shards[_shard(hash)].insert(key, hash, value, charge, deleter);
+    return _shards[_shard(hash)].insert(key, hash, value, charge, deleter, priority);
 }
 
 Cache::Handle* ShardedLRUCache::lookup(const CacheKey& key) {
@@ -352,9 +456,13 @@ void* ShardedLRUCache::value(Handle* handle) {
     return reinterpret_cast<LRUHandle*>(handle)->value;
 }
 
+Slice ShardedLRUCache::value_slice(Handle* handle) {
+    auto lru_handle = reinterpret_cast<LRUHandle*>(handle);
+    return Slice((char*)lru_handle->value, lru_handle->charge);
+}
+
 uint64_t ShardedLRUCache::new_id() {
-    AutoMutexLock l(&_id_mutex);
-    return ++(_last_id);
+    return _last_id.fetch_add(1, std::memory_order_relaxed);
 }
 
 void ShardedLRUCache::prune() {
@@ -362,54 +470,31 @@ void ShardedLRUCache::prune() {
     for (int s = 0; s < kNumShards; s++) {
         num_prune += _shards[s].prune();
     }
-    OLAP_LOG_INFO("prune file descriptor: %d", num_prune);
+    VLOG(7) << "Successfully prune cache, clean " << num_prune << " entries.";
 }
 
-size_t ShardedLRUCache::get_memory_usage() {
+void ShardedLRUCache::update_cache_metrics() const {
+    size_t total_capacity = 0;
     size_t total_usage = 0;
-    for (int s = 0; s < kNumShards; s++) {
-        total_usage += _shards[s].get_usage();
-    }
-    return total_usage;
-}
-
-void ShardedLRUCache::get_cache_status(rapidjson::Document* document) {
-    size_t shard_count = sizeof(_shards) / sizeof(LRUCache);
-
-    for (uint32_t i = 0; i < shard_count; ++i) {
-        size_t capacity = _shards[i].get_capacity();
-        size_t usage = _shards[i].get_usage();
-        rapidjson::Value shard_info(rapidjson::kObjectType);
-        shard_info.AddMember("capacity", static_cast<double>(capacity), document->GetAllocator());
-        shard_info.AddMember("usage", static_cast<double>(usage), document->GetAllocator());
-
-        float usage_ratio = 0.0f;
-
-        if (0 != capacity) {
-            usage_ratio = static_cast<float>(usage) / static_cast<float>(capacity);
-        }
-
-        shard_info.AddMember("usage_ratio", usage_ratio, document->GetAllocator());
-
-        size_t lookup_count = _shards[i].get_lookup_count();
-        size_t hit_count = _shards[i].get_hit_count();
-        shard_info.AddMember("lookup_count", static_cast<double>(lookup_count), document->GetAllocator());
-        shard_info.AddMember("hit_count", static_cast<double>(hit_count), document->GetAllocator());
-
-        float hit_ratio = 0.0f;
-
-        if (0 != lookup_count) {
-            hit_ratio = static_cast<float>(hit_count) / static_cast<float>(lookup_count);
-        }
-
-        shard_info.AddMember("hit_ratio", hit_ratio, document->GetAllocator());
-        document->PushBack(shard_info, document->GetAllocator());
+    size_t total_lookup_count = 0;
+    size_t total_hit_count = 0;
+    for (int i = 0; i < kNumShards; i++) {
+        total_capacity += _shards[i].get_capacity();
+        total_usage += _shards[i].get_usage();
+        total_lookup_count += _shards[i].get_lookup_count();
+        total_hit_count += _shards[i].get_hit_count();
     }
 
+    capacity->set_value(total_capacity);
+    usage->set_value(total_usage);
+    lookup_count->set_value(total_lookup_count);
+    hit_count->set_value(total_hit_count);
+    usage_ratio->set_value(total_capacity == 0 ? 0 : (total_usage / total_capacity));
+    hit_ratio->set_value(total_lookup_count == 0 ? 0 : (total_hit_count / total_lookup_count));
 }
 
-Cache* new_lru_cache(size_t capacity) {
-    return new ShardedLRUCache(capacity);
+Cache* new_lru_cache(const std::string& name, size_t capacity) {
+    return new ShardedLRUCache(name, capacity);
 }
 
-}  // namespace palo
+}  // namespace doris

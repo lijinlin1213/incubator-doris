@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_BUFFER_POOL_H
-#define BDG_PALO_BE_RUNTIME_BUFFER_POOL_H
+#ifndef DORIS_BE_RUNTIME_BUFFER_POOL_H
+#define DORIS_BE_RUNTIME_BUFFER_POOL_H
 
 #include <stdint.h>
 #include <string>
@@ -39,7 +36,7 @@
 #include "util/mem_range.h"
 #include "util/spinlock.h"
 
-namespace palo {
+namespace doris {
 
 class ReservationTracker;
 class RuntimeProfile;
@@ -179,8 +176,8 @@ class BufferPool : public CacheLineAligned {
   /// The client's reservation is created as a child of 'parent_reservation' with limit
   /// 'reservation_limit' and associated with MemTracker 'mem_tracker'. The initial
   /// reservation is 0 bytes.
-  Status RegisterClient(const std::string& name, //TmpFileMgr::FileGroup* file_group,
-      ReservationTracker* parent_reservation, MemTracker* mem_tracker,
+  Status RegisterClient(const std::string& name,
+      ReservationTracker* parent_reservation, const std::shared_ptr<MemTracker>& mem_tracker,
       int64_t reservation_limit, RuntimeProfile* profile,
       ClientHandle* client) WARN_UNUSED_RESULT;
 

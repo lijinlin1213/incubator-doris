@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -24,6 +26,7 @@
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/http.h>
+#include <event2/http_struct.h>
 #include <event2/keyvalq_struct.h>
 
 #include "http/http_handler.h"
@@ -31,7 +34,7 @@
 #include "common/logging.h"
 #include "util/url_coding.h"
 
-namespace palo {
+namespace doris {
 
 static std::string s_empty = "";
 
@@ -40,7 +43,8 @@ HttpRequest::HttpRequest(evhttp_request* evhttp_request)
 }
 
 HttpRequest::~HttpRequest() {
-    if (_handler != nullptr && _handler_ctx != nullptr) {
+    if (_handler_ctx != nullptr) {
+        DCHECK(_handler != nullptr);
         _handler->free_handler_ctx(_handler_ctx);
     }
 }
@@ -118,9 +122,7 @@ const std::string& HttpRequest::param(const std::string& key) const {
 }
 
 void HttpRequest::add_output_header(const char* key, const char* value) {
-#ifndef BE_TEST
     evhttp_add_header(evhttp_request_get_output_headers(_ev_req), key, value);
-#endif
 }
 
 std::string HttpRequest::get_request_body() {
@@ -136,6 +138,10 @@ std::string HttpRequest::get_request_body() {
     _request_body.resize(length);
     evbuffer_remove(evbuf, (char*)_request_body.data(), length);
     return _request_body;
+}
+
+const char* HttpRequest::remote_host() const {
+    return _ev_req->remote_host;
 }
 
 }

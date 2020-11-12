@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,13 +22,12 @@
 
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_array.hpp>
-#include "codegen/palo_ir.h"
+#include "codegen/doris_ir.h"
 #include "common/compiler_util.h"
 #include "common/status.h"
 #include "exprs/agg_fn.h"
-#include "exprs/hybird_map.h"
+#include "exprs/hybrid_map.h"
 #include "runtime/descriptors.h"
-#include "runtime/lib_cache.h"
 #include "runtime/tuple_row.h"
 #include "runtime/types.h"
 #include "udf/udf.h"
@@ -41,7 +37,7 @@
 #include "gen_cpp/PlanNodes_types.h"
 #include "gen_cpp/Types_types.h"
 
-namespace palo {
+namespace doris {
 
 class MemPool;
 class MemTracker;
@@ -73,13 +69,13 @@ class NewAggFnEvaluator {
   /// from 'mem_pool'. Note that it's the responsibility to call Close() all evaluators
   /// even if this function returns error status on initialization failure.
   static Status Create(const AggFn& agg_fn, RuntimeState* state, ObjectPool* pool,
-      MemPool* mem_pool, NewAggFnEvaluator** eval, MemTracker* tracker, 
+      MemPool* mem_pool, NewAggFnEvaluator** eval, const std::shared_ptr<MemTracker>& tracker,
       const RowDescriptor& row_desc) WARN_UNUSED_RESULT;
 
   /// Convenience functions for creating evaluators for multiple aggregate functions.
   static Status Create(const std::vector<AggFn*>& agg_fns, RuntimeState* state,
       ObjectPool* pool, MemPool* mem_pool, std::vector<NewAggFnEvaluator*>* evals,
-      MemTracker* tracker, const RowDescriptor& row_desc) WARN_UNUSED_RESULT;
+      const std::shared_ptr<MemTracker>& tracker, const RowDescriptor& row_desc) WARN_UNUSED_RESULT;
 
   ~NewAggFnEvaluator();
 
@@ -166,6 +162,7 @@ class NewAggFnEvaluator {
   static const size_t FLOAT_SIZE = sizeof(float);
   static const size_t DOUBLE_SIZE = sizeof(double);
   static const size_t DECIMAL_SIZE = sizeof(DecimalValue);
+  static const size_t DECIMALV2_SIZE = sizeof(DecimalV2Value);
   static const size_t TIME_DURATION_SIZE = sizeof(boost::posix_time::time_duration);
   static const size_t DATE_SIZE = sizeof(boost::gregorian::date);
   static const size_t LARGEINT_SIZE = sizeof(__int128);
@@ -203,8 +200,6 @@ class NewAggFnEvaluator {
   std::string DebugString() const;
   static std::string DebugString(const std::vector<NewAggFnEvaluator*>& evals);
 
-  static const char* LLVM_CLASS_NAME;
-
  private:
 
   uint64_t _total_mem_consumption;
@@ -228,7 +223,7 @@ class NewAggFnEvaluator {
   /// Owned by the exec node which owns this evaluator.
   MemPool* mem_pool_ = nullptr;
 
-  MemTracker* _mem_tracker;  // saved c'tor param
+  std::shared_ptr<MemTracker> _mem_tracker;  // saved c'tor param
 
   /// This contains runtime state such as constant input arguments to the aggregate
   /// functions and a FreePool from which the intermediate values are allocated.
@@ -242,15 +237,15 @@ class NewAggFnEvaluator {
   /// Staging input values used by the interpreted Update() / Merge() paths.
   /// It stores the evaluation results of input expressions to be passed to the
   /// Update() / Merge() function.
-  std::vector<palo_udf::AnyVal*> staging_input_vals_;
+  std::vector<doris_udf::AnyVal*> staging_input_vals_;
 
   /// Staging intermediate and merged values used in the interpreted
   /// Update() / Merge() paths.
-  palo_udf::AnyVal* staging_intermediate_val_ = nullptr;
-  palo_udf::AnyVal* staging_merge_input_val_ = nullptr;
+  doris_udf::AnyVal* staging_intermediate_val_ = nullptr;
+  doris_udf::AnyVal* staging_merge_input_val_ = nullptr;
 
   /// Use Create() instead.
-  NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool, MemTracker* tracker, bool is_clone);
+  NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool, const std::shared_ptr<MemTracker>& tracker, bool is_clone);
 
   /// Return the intermediate type of the aggregate function.
   inline const SlotDescriptor& intermediate_slot_desc() const;
@@ -278,10 +273,10 @@ class NewAggFnEvaluator {
 
   /// Writes the result in src into dst pointed to by dst_slot_desc
   inline void SetDstSlot(
-      const palo_udf::AnyVal* src, const SlotDescriptor& dst_slot_desc, Tuple* dst);
+      const doris_udf::AnyVal* src, const SlotDescriptor& dst_slot_desc, Tuple* dst);
 
   // Sets 'dst' to the value from 'slot'.
-  void set_any_val(const void* slot, const TypeDescriptor& type, palo_udf::AnyVal* dst);
+  void set_any_val(const void* slot, const TypeDescriptor& type, doris_udf::AnyVal* dst);
 };
 
 inline void NewAggFnEvaluator::Add(const TupleRow* row, Tuple* dst) {

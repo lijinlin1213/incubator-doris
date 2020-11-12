@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -15,14 +17,15 @@
 
 #include <gtest/gtest.h>
 
-#include "olap/column_file/byte_buffer.h"
-#include "olap/column_file/stream_name.h"
-#include "olap/column_file/column_reader.h"
-#include "olap/column_file/column_writer.h"
+#include "olap/byte_buffer.h"
+#include "olap/stream_name.h"
+#include "olap/rowset/column_reader.h"
+#include "olap/rowset/column_writer.h"
 #include "olap/field.h"
 #include "olap/olap_define.h"
 #include "olap/olap_common.h"
 #include "olap/row_cursor.h"
+#include "olap/row_block.h"
 #include "runtime/mem_pool.h"
 #include "runtime/string_value.hpp"
 #include "runtime/vectorized_row_batch.h"
@@ -30,8 +33,7 @@
 
 using std::string;
 
-namespace palo {
-namespace column_file {
+namespace doris {
 
 class TestColumn : public testing::Test {
 public:
@@ -40,18 +42,6 @@ public:
             _column_reader(NULL),
             _stream_factory(NULL) {
             _offsets.clear();
-        _map_in_streams.clear();
-
-        _present_buffers.clear();
-        
-        _data_buffers.clear();
-
-        _second_buffers.clear();
-
-        _dictionary_buffers.clear();
-
-        _length_buffers.clear();
-
         _mem_tracker.reset(new MemTracker(-1));
         _mem_pool.reset(new MemPool(_mem_tracker.get()));
     }
@@ -66,38 +56,32 @@ public:
         _offsets.push_back(0);
 
         _stream_factory = 
-                new(std::nothrow) OutStreamFactory(COMPRESS_LZO,
+                new(std::nothrow) OutStreamFactory(COMPRESS_LZ4,
                                                    OLAP_DEFAULT_COLUMN_STREAM_BUFFER_SIZE);
         ASSERT_TRUE(_stream_factory != NULL);
-        config::column_dictionary_key_ration_threshold = 30;
+        config::column_dictionary_key_ratio_threshold = 30;
         config::column_dictionary_key_size_threshold = 1000;
     }
     
     virtual void TearDown() {
         SAFE_DELETE(_column_writer);
-
         SAFE_DELETE(_column_reader);
-
         SAFE_DELETE(_stream_factory);
-        
         SAFE_DELETE(_shared_buffer);
         
         _offsets.clear();
-
+        for (auto in_stream : _map_in_streams) {
+            delete in_stream.second;
+        }
         _map_in_streams.clear();
-
         _present_buffers.clear();
-        
         _data_buffers.clear();
-
         _second_buffers.clear();
-
         _dictionary_buffers.clear();
-
         _length_buffers.clear();
     }
 
-    void CreateColumnWriter(const std::vector<FieldInfo> &tablet_schema) {
+    void CreateColumnWriter(const TabletSchema& tablet_schema) {
         _column_writer = ColumnWriter::create(
                 0, tablet_schema, _stream_factory, 1024, BLOOM_FILTER_DEFAULT_FPP);
         
@@ -105,7 +89,7 @@ public:
         ASSERT_EQ(_column_writer->init(), OLAP_SUCCESS);
     }
 
-    void CreateColumnReader(const std::vector<FieldInfo> &tablet_schema) {
+    void CreateColumnReader(const TabletSchema& tablet_schema) {
         UniqueIdEncodingMap encodings;
         encodings[0] = ColumnEncodingMessage();
         encodings[0].set_kind(ColumnEncodingMessage::DIRECT);
@@ -114,7 +98,7 @@ public:
     }
 
     void CreateColumnReader(
-            const std::vector<FieldInfo> &tablet_schema,
+            const TabletSchema& tablet_schema,
             UniqueIdEncodingMap &encodings) {
         UniqueIdToColumnIdMap included;
         included[0] = 0;
@@ -122,17 +106,18 @@ public:
         segment_included[0] = 0;
 
         _column_reader = ColumnReader::create(0,
-                                               tablet_schema,
-                                               included,
-                                               segment_included,
-                                               encodings);
+                                     tablet_schema,
+                                     included,
+                                     segment_included,
+                                     encodings);
         
         ASSERT_TRUE(_column_reader != NULL);
 
-        system("rm ./tmp_file");
+        system("mkdir -p ./ut_dir");
+        system("rm ./ut_dir/tmp_file");
 
         ASSERT_EQ(OLAP_SUCCESS, 
-                  helper.open_with_mode("tmp_file", 
+                  helper.open_with_mode("./ut_dir/tmp_file", 
                                         O_CREAT | O_EXCL | O_WRONLY, 
                                         S_IRUSR | S_IWUSR));
         std::vector<int> off;
@@ -145,7 +130,7 @@ public:
         for (; it != _stream_factory->streams().end(); ++it) {
             StreamName stream_name = it->first;
             OutStream *out_stream = it->second;
-            std::vector<ByteBuffer*> *buffers;
+            std::vector<StorageByteBuffer*> *buffers;
 
             if (out_stream->is_suppressed()) {
                 continue;
@@ -176,10 +161,10 @@ public:
         }
         helper.close();
 
-        ASSERT_EQ(OLAP_SUCCESS, helper.open_with_mode("tmp_file", 
+        ASSERT_EQ(OLAP_SUCCESS, helper.open_with_mode("./ut_dir/tmp_file", 
                 O_RDONLY, S_IRUSR | S_IWUSR)); 
 
-        _shared_buffer = ByteBuffer::create(
+        _shared_buffer = StorageByteBuffer::create(
                 OLAP_DEFAULT_COLUMN_STREAM_BUFFER_SIZE + sizeof(StreamHead));
         ASSERT_TRUE(_shared_buffer != NULL);
 
@@ -189,7 +174,7 @@ public:
                     &_shared_buffer,
                     off[i], 
                     length[i], 
-                    lzo_decompress, 
+                    lz4_decompress, 
                     buffer_size[i],
                     &_stats);
             ASSERT_EQ(OLAP_SUCCESS, in_stream->init());
@@ -198,29 +183,31 @@ public:
         }
 
         ASSERT_EQ(_column_reader->init(
-                        &_map_in_streams,
-                        1024,
-                        _mem_pool.get(),
-                        &_stats), OLAP_SUCCESS);
+                   &_map_in_streams,
+                   1024,
+                   _mem_pool.get(),
+                   &_stats), OLAP_SUCCESS);
     }
 
-    void SetFieldInfo(FieldInfo &field_info,
-                      std::string name,
-                      FieldType type,
-                      FieldAggregationMethod aggregation,
-                      uint32_t length,
-                      bool is_allow_null,
-                      bool is_key) {
-        field_info.name = name;
-        field_info.type = type;
-        field_info.aggregation = aggregation;
-        field_info.length = length;
-        field_info.is_allow_null = is_allow_null;
-        field_info.is_key = is_key;
-        field_info.precision = 1000;
-        field_info.frac = 10000;
-        field_info.unique_id = 0;
-        field_info.is_bf_column = false;
+    void SetTabletSchemaWithOneColumn(std::string name,
+                 std::string type,
+                 std::string aggregation,
+                 uint32_t length,
+                 bool is_allow_null,
+                 bool is_key, TabletSchema* tablet_schema) {
+        TabletSchemaPB tablet_schema_pb;
+        ColumnPB* column = tablet_schema_pb.add_column();
+        column->set_unique_id(0);
+        column->set_name(name);
+        column->set_type(type);
+        column->set_is_key(is_key);
+        column->set_is_nullable(is_allow_null);
+        column->set_length(length);
+        column->set_aggregation(aggregation);
+        column->set_precision(1000);
+        column->set_frac(1000);
+        column->set_is_bf_column(false);
+        tablet_schema->init_from_pb(tablet_schema_pb);
     }
 
     void create_and_save_last_position() {
@@ -228,60 +215,56 @@ public:
     }
 
     ColumnWriter *_column_writer;
-
     ColumnReader *_column_reader;
-    std::unique_ptr<MemTracker> _mem_tracker;
+    std::shared_ptr<MemTracker> _mem_tracker;
     std::unique_ptr<MemPool> _mem_pool;
     std::unique_ptr<ColumnVector> _col_vector;
 
     OutStreamFactory *_stream_factory;
 
     std::vector<size_t> _offsets;
+    std::vector<StorageByteBuffer*> _present_buffers;
+    std::vector<StorageByteBuffer*> _data_buffers;
+    std::vector<StorageByteBuffer*> _second_buffers;
+    std::vector<StorageByteBuffer*> _dictionary_buffers;
+    std::vector<StorageByteBuffer*> _length_buffers;
 
-    std::vector<ByteBuffer*> _present_buffers;
-
-    std::vector<ByteBuffer*> _data_buffers;
-
-    std::vector<ByteBuffer*> _second_buffers;
-
-    std::vector<ByteBuffer*> _dictionary_buffers;
-
-    std::vector<ByteBuffer*> _length_buffers;
-
-    ByteBuffer* _shared_buffer;
-
+    StorageByteBuffer* _shared_buffer;
     std::map<StreamName, ReadOnlyFileStream *> _map_in_streams;
-
     FileHandler helper;
-
     OlapReaderStatistics _stats;
 };
 
 TEST_F(TestColumn, VectorizedTinyColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                     std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn", 
+            "TINYINT", 
+            "REPLACE", 
+            1, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -307,35 +290,45 @@ TEST_F(TestColumn, VectorizedTinyColumnWithoutPresent) {
 
 TEST_F(TestColumn, SeekTinyColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn",
+            "TINYINT",
+            "REPLACE",
+            1,
+            false,
+            true,
+            &tablet_schema);
 
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+    
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     
     create_and_save_last_position();
 
@@ -383,32 +376,40 @@ TEST_F(TestColumn, SeekTinyColumnWithoutPresent) {
 
 TEST_F(TestColumn, SkipTinyColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn",
+            "TINYINT",
+            "REPLACE",
+            1,
+            false,
+            true,
+            &tablet_schema);
 
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
 
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(2, write_row);
+    block.finalize(3);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -430,28 +431,35 @@ TEST_F(TestColumn, SkipTinyColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedTinyColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn", 
+            "TINYINT", 
+            "REPLACE", 
+            1, 
+            true,
+            true,
+            &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     write_row.set_not_null(0);
     char value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -475,28 +483,35 @@ TEST_F(TestColumn, VectorizedTinyColumnWithPresent) {
 
 TEST_F(TestColumn, TinyColumnIndex) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn", 
+            "TINYINT", 
+            "REPLACE", 
+            1, 
+            true,
+            true,
+            &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -520,34 +535,44 @@ TEST_F(TestColumn, TinyColumnIndex) {
 
 TEST_F(TestColumn, SeekTinyColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn", 
+            "TINYINT", 
+            "REPLACE", 
+            1, 
+            true,
+            true,
+            &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
 
@@ -594,32 +619,38 @@ TEST_F(TestColumn, SeekTinyColumnWithPresent) {
 
 TEST_F(TestColumn, SkipTinyColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("TinyColumn"), 
-                 OLAP_FIELD_TYPE_TINYINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 1, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "TinyColumn", 
+            "TINYINT", 
+            "REPLACE", 
+            1, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     char value = 1;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
 
     value = 3;
     write_row.set_field_content(0, &value, _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(2, write_row);
+    block.finalize(3);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -641,28 +672,34 @@ TEST_F(TestColumn, SkipTinyColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedShortColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int16_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -686,34 +723,41 @@ TEST_F(TestColumn, VectorizedShortColumnWithoutPresent) {
 
 TEST_F(TestColumn, SeekShortColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int16_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
 
@@ -761,32 +805,38 @@ TEST_F(TestColumn, SeekShortColumnWithoutPresent) {
 
 TEST_F(TestColumn, SkipShortColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int16_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
 
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(2, write_row);
+    block.finalize(3);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -808,34 +858,41 @@ TEST_F(TestColumn, SkipShortColumnWithoutPresent) {
 
 TEST_F(TestColumn, SeekShortColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int16_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
 
@@ -880,29 +937,35 @@ TEST_F(TestColumn, SeekShortColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedShortColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     int16_t value = 3;
     write_row.set_not_null(0);
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -928,32 +991,37 @@ TEST_F(TestColumn, VectorizedShortColumnWithPresent) {
 
 TEST_F(TestColumn, SkipShortColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("ShortColumn"), 
-                 OLAP_FIELD_TYPE_SMALLINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 2, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "ShortColumn", 
+            "SMALLINT", 
+            "REPLACE", 
+            2, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int16_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 2;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
 
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(2, write_row);
+    block.finalize(3);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -975,28 +1043,34 @@ TEST_F(TestColumn, SkipShortColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedIntColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("IntColumn"), 
-                 OLAP_FIELD_TYPE_INT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "IntColumn", 
+            "INT", 
+            "REPLACE", 
+            4, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 1024;
+    block.init(block_info);
+
     int32_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
 
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1020,26 +1094,30 @@ TEST_F(TestColumn, VectorizedIntColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedIntColumnMassWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("IntColumn"), 
-                 OLAP_FIELD_TYPE_INT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "IntColumn", 
+            "INT", 
+            "REPLACE", 
+            4, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     for (int32_t i = 0; i < 10000; i++) {
         write_row.set_field_content(0, reinterpret_cast<char *>(&i), _mem_pool.get());
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(i, write_row);
     }
+    block.finalize(10000);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1069,27 +1147,34 @@ TEST_F(TestColumn, VectorizedIntColumnMassWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedIntColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("IntColumn"), 
-                 OLAP_FIELD_TYPE_INT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "IntColumn", 
+            "INT", 
+            "REPLACE", 
+            4, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     int32_t value = -1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1116,28 +1201,35 @@ TEST_F(TestColumn, VectorizedIntColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedLongColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("LongColumnWithoutPresent"), 
-                 OLAP_FIELD_TYPE_BIGINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "LongColumnWithoutPresent", 
+            "BIGINT", 
+            "REPLACE", 
+            8, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     int64_t value = 1;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     value = 3;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1161,28 +1253,35 @@ TEST_F(TestColumn, VectorizedLongColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedLongColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("LongColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_BIGINT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "LongColumnWithPresent", 
+            "BIGINT", 
+            "REPLACE", 
+            8, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     int64_t value = 3;
     write_row.set_not_null(0);
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1208,28 +1307,35 @@ TEST_F(TestColumn, VectorizedLongColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedFloatColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("FloatColumnWithoutPresent"), 
-                 OLAP_FIELD_TYPE_FLOAT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "FloatColumnWithoutPresent", 
+            "FLOAT", 
+            "REPLACE", 
+            4, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     float value = 1.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     value = 3.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1254,28 +1360,36 @@ TEST_F(TestColumn, VectorizedFloatColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedFloatColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("FloatColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_FLOAT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "FloatColumnWithPresent", 
+            "FLOAT", 
+            "REPLACE", 
+            4, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     float value = 3.234;
     write_row.set_not_null(0);
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1301,30 +1415,38 @@ TEST_F(TestColumn, VectorizedFloatColumnWithPresent) {
 
 TEST_F(TestColumn, SeekFloatColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("FloatColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_FLOAT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "FloatColumnWithPresent", 
+            "FLOAT", 
+            "REPLACE", 
+            4, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     float value = 1.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     value = 3.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
 
@@ -1364,28 +1486,36 @@ TEST_F(TestColumn, SeekFloatColumnWithPresent) {
 
 TEST_F(TestColumn, SkipFloatColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("FloatColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_FLOAT, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 4, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "FloatColumnWithPresent", 
+            "FLOAT", 
+            "REPLACE", 
+            4, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     float value = 1.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     value = 3.234;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1407,28 +1537,36 @@ TEST_F(TestColumn, SkipFloatColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedDoubleColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DoubleColumnWithoutPresent"), 
-                 OLAP_FIELD_TYPE_DOUBLE, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DoubleColumnWithoutPresent", 
+            "DOUBLE", 
+            "REPLACE", 
+            8, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     double value = 1.23456789;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     value = 3.23456789;
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1453,28 +1591,36 @@ TEST_F(TestColumn, VectorizedDoubleColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedDoubleColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DoubleColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_DOUBLE, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DoubleColumnWithPresent", 
+            "DOUBLE", 
+            "REPLACE", 
+            8, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     double value = 3.23456789;
     write_row.set_not_null(0);
     write_row.set_field_content(0, reinterpret_cast<char *>(&value), _mem_pool.get());
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1501,26 +1647,32 @@ TEST_F(TestColumn, VectorizedDoubleColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedDatetimeColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DatetimeColumnWithoutPresent"), 
-                 OLAP_FIELD_TYPE_DATETIME, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DatetimeColumnWithoutPresent", 
+            "DATETIME", 
+            "REPLACE", 
+            8, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("2000-10-10 10:10:10");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1542,29 +1694,38 @@ TEST_F(TestColumn, VectorizedDatetimeColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedDatetimeColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DatetimeColumnWithoutPresent"), 
-                 OLAP_FIELD_TYPE_DATETIME, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 8, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DatetimeColumnWithoutPresent", 
+            "DATETIME", 
+            "REPLACE", 
+            8, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);    
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     std::vector<string> val_string_array;
     val_string_array.push_back("2000-10-10 10:10:10");
-    write_row.from_string(val_string_array);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1592,29 +1753,98 @@ TEST_F(TestColumn, VectorizedDatetimeColumnWithPresent) {
     ASSERT_NE(_column_reader->next_vector(
         _col_vector.get(), 2, _mem_pool.get()), OLAP_SUCCESS);
 }
+TEST_F(TestColumn, VectorizedDatetimeColumnZero) {
+    // write data
+    TabletSchema tablet_schema;
+
+    SetTabletSchemaWithOneColumn(
+            "DatetimeColumnWithoutPresent",
+            "DATETIME",
+            "REPLACE",
+            8,
+            true,
+            true, &tablet_schema);
+    CreateColumnWriter(tablet_schema);
+
+    RowCursor write_row;
+    write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
+    write_row.set_null(0);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
+    std::vector<string> val_string_array;
+    val_string_array.push_back("1000-01-01 00:00:00");
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
+    write_row.set_not_null(0);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
+    ColumnDataHeaderMessage header;
+    ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
+
+    // read data
+    CreateColumnReader(tablet_schema);
+
+    RowCursor read_row;
+    read_row.init(tablet_schema);
+
+    _col_vector.reset(new ColumnVector());
+    ASSERT_EQ(_column_reader->next_vector(
+            _col_vector.get(), 2, _mem_pool.get()), OLAP_SUCCESS);
+    bool *is_null = _col_vector->is_null();
+    ASSERT_EQ(is_null[0], true);
+
+    char *data = reinterpret_cast<char *>(_col_vector->col_data());
+    ASSERT_EQ(is_null[1], false);
+
+    data += sizeof(uint64_t);
+    read_row.set_field_content(0, data, _mem_pool.get());
+    std::cout << read_row.to_string() << std::endl;
+    ASSERT_TRUE(strncmp(read_row.to_string().c_str(),
+            "0&1000-01-01 00:00:00", strlen("0&1000-01-01 00:00:00")) == 0);
+
+    ASSERT_NE(_column_reader->next_vector(
+            _col_vector.get(), 2, _mem_pool.get()), OLAP_SUCCESS);
+}
+
 
 TEST_F(TestColumn, VectorizedDateColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DateColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_DATE, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 3, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DateColumnWithoutoutPresent", 
+            "DATE", 
+            "REPLACE", 
+            3, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("2000-10-10");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1635,31 +1865,39 @@ TEST_F(TestColumn, VectorizedDateColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedDateColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DateColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_DATE, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 3, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DateColumnWithoutoutPresent", 
+            "DATE", 
+            "REPLACE", 
+            3, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-   
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0); 
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     std::vector<string> val_string_array;
     val_string_array.push_back("2000-10-10");
-    write_row.from_string(val_string_array);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
     for (uint32_t i = 0; i < 100; ++i) {
         write_row.set_not_null(0);
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     }
     
     ColumnDataHeaderMessage header;
@@ -1689,31 +1927,41 @@ TEST_F(TestColumn, VectorizedDateColumnWithPresent) {
 
 TEST_F(TestColumn, VectorizedDecimalColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DecimalColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_DECIMAL, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 12, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DecimalColumnWithoutoutPresent", 
+            "DECIMAL", 
+            "REPLACE", 
+            12, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     
     std::vector<string> val_string_array;
     val_string_array.push_back("1234.5678");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back("5678.1234");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1738,31 +1986,40 @@ TEST_F(TestColumn, VectorizedDecimalColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedDecimalColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DecimalColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_DECIMAL, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 12, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DecimalColumnWithoutoutPresent", 
+            "DECIMAL", 
+            "REPLACE", 
+            12, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     
     std::vector<string> val_string_array;
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back("5678.1234");
-    write_row.from_string(val_string_array);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1788,31 +2045,38 @@ TEST_F(TestColumn, VectorizedDecimalColumnWithPresent) {
 
 TEST_F(TestColumn, SkipDecimalColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DecimalColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_DECIMAL, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 12, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DecimalColumnWithPresent", 
+            "DECIMAL", 
+            "REPLACE", 
+            12, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("1234.5678");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    write_row.from_tuple(val_string_array);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back("5678.1234");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    write_row.from_tuple(val_string_array);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1836,33 +2100,41 @@ TEST_F(TestColumn, SkipDecimalColumnWithPresent) {
 
 TEST_F(TestColumn, SeekDecimalColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DecimalColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_DECIMAL, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 12, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "DecimalColumnWithPresent", 
+            "DECIMAL", 
+            "REPLACE", 
+            12, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("1234.5678");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
     
     val_string_array.clear();
     val_string_array.push_back("5678.1234");
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     create_and_save_last_position();
 
@@ -1908,18 +2180,16 @@ TEST_F(TestColumn, SeekDecimalColumnWithPresent) {
 }
 
 TEST_F(TestColumn, VectorizedLargeIntColumnWithoutPresent) {
-    // init table schema
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("LargeIntColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_LARGEINT, 
-                 OLAP_FIELD_AGGREGATION_SUM, 
-                 16, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    // init tablet schema
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "LargeIntColumnWithoutoutPresent", 
+            "LARGEINT", 
+            "SUM", 
+            16, 
+            false,
+            true, &tablet_schema);
     // test data
     string value1 = "100000000000000000000000000000000000000";
     string value2 = "-170141183460469231731687303715884105728";
@@ -1929,15 +2199,26 @@ TEST_F(TestColumn, VectorizedLargeIntColumnWithoutPresent) {
     RowCursor write_row;
     write_row.init(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back(value1);
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back(value2);
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -1961,17 +2242,17 @@ TEST_F(TestColumn, VectorizedLargeIntColumnWithoutPresent) {
 }
 
 TEST_F(TestColumn, VectorizedLargeIntColumnWithPresent) {
-    // init table schema
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("LargeIntColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_LARGEINT, 
-                 OLAP_FIELD_AGGREGATION_SUM, 
-                 16, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
+    // init tablet schema
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "LargeIntColumnWithoutoutPresent", 
+            "LARGEINT", 
+            "SUM", 
+            16, 
+            true,
+            true, &tablet_schema);
+    
 
     // test data
     string value1 = "100000000000000000000000000000000000000";
@@ -1981,21 +2262,34 @@ TEST_F(TestColumn, VectorizedLargeIntColumnWithPresent) {
     CreateColumnWriter(tablet_schema);
     RowCursor write_row;
     write_row.init(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     
     std::vector<string> val_string_array;
     val_string_array.push_back(value1);
-    write_row.from_string(val_string_array);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back(value2);
-    write_row.from_string(val_string_array);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2027,18 +2321,16 @@ TEST_F(TestColumn, VectorizedLargeIntColumnWithPresent) {
 }
 
 TEST_F(TestColumn, SkipLargeIntColumnWithPresent) {
-    // init table schema
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("LargeIntColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_LARGEINT, 
-                 OLAP_FIELD_AGGREGATION_SUM, 
-                 16, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    // init tablet schema
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "LargeIntColumnWithPresent", 
+            "LARGEINT",
+            "SUM",
+            16,
+            true,
+            true, &tablet_schema);
     // test data
     string value1 = "100000000000000000000000000000000000000";
     string value2 = "-170141183460469231731687303715884105728";
@@ -2047,16 +2339,27 @@ TEST_F(TestColumn, SkipLargeIntColumnWithPresent) {
     CreateColumnWriter(tablet_schema);
     RowCursor write_row;
     write_row.init(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
     
     std::vector<string> val_string_array;
     val_string_array.push_back(value1);
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back(value2);
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2076,111 +2379,49 @@ TEST_F(TestColumn, SkipLargeIntColumnWithPresent) {
     ASSERT_TRUE(strncmp(read_row.to_string().c_str(), value2.c_str(), value2.size()) == 0);
 }
 
-// TODO(jiangguoqiang): this test has a problem. Need to fix it.
-// TEST_F(TestColumn, SeekLargeIntColumnWithPresent) {
-    // // init table schema
-    // std::vector<FieldInfo> tablet_schema;
-    // FieldInfo field_info;
-    // SetFieldInfo(field_info,
-                 // std::string("LargeIntColumnWithPresent"), 
-                 // OLAP_FIELD_TYPE_LARGEINT, 
-                 // OLAP_FIELD_AGGREGATION_SUM, 
-                 // 16, 
-                 // true,
-                 // true);
-    // tablet_schema.push_back(field_info);
-
-    // // test data
-    // string value1 = "100000000000000000000000000000000000000";
-    // string value2 = "-170141183460469231731687303715884105728";
-    // string value3 = "65535";
-
-    // // write data
-    // CreateColumnWriter(tablet_schema);
-    // RowCursor write_row;
-    // write_row.init(tablet_schema);
-    
-    // std::vector<string> val_string_array;
-    // val_string_array.push_back(value1);
-    // write_row.from_string(val_string_array);
-    // ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
-
-    // val_string_array.clear();
-    // val_string_array.push_back(value2);
-    // write_row.from_string(val_string_array);
-    // ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
-
-    // create_and_save_last_position();
-    
-    // val_string_array.clear();
-    // val_string_array.push_back(value3);
-    // write_row.from_string(val_string_array);
-    // ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
-
-    // create_and_save_last_position();
-
-    // ColumnDataHeaderMessage header;
-    // ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
-
-    // // read data
-    // CreateColumnReader(tablet_schema);
-    // RowCursor read_row;
-    // read_row.init(tablet_schema);
-    // PositionEntryReader entry0;
-    // entry0._positions = _column_writer->index()->mutable_entry(0)->_positions;
-    // entry0._positions_count = _column_writer->index()->mutable_entry(0)->_positions_count;
-    // entry0._statistics.init(OLAP_FIELD_TYPE_LARGEINT);
-
-    // PositionEntryReader entry1;
-    // entry1._positions = _column_writer->index()->mutable_entry(1)->_positions;
-    // entry1._positions_count = _column_writer->index()->mutable_entry(1)->_positions_count;
-    // entry1._statistics.init(OLAP_FIELD_TYPE_LARGEINT);
-
-    // PositionProvider position0(&entry0);
-    // PositionProvider position1(&entry1);
-
-    // ASSERT_EQ(_column_reader->seek(&position0), OLAP_SUCCESS);
-    // ASSERT_EQ(_column_reader->next(), OLAP_SUCCESS);
-    // ASSERT_EQ(_column_reader->attach(&read_row), OLAP_SUCCESS);
-    // ASSERT_TRUE(strncmp(read_row.to_string().c_str(), value1.c_str(), value1.size()) == 0);
-    
-    // ASSERT_EQ(_column_reader->seek(&position1), OLAP_SUCCESS);
-    // ASSERT_EQ(_column_reader->next(), OLAP_SUCCESS);
-    // ASSERT_EQ(_column_reader->attach(&read_row), OLAP_SUCCESS);
-    // ASSERT_TRUE(strncmp(read_row.to_string().c_str(), value3.c_str(), value3.size()) == 0);
-// }
-
 TEST_F(TestColumn, VectorizedDirectVarcharColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 10, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithoutoutPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            10, 
+            false,
+            true, &tablet_schema);
 
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("YWJjZGU="); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     for (uint32_t i = 0; i < 2; i++) {
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     }
     val_string_array.clear();
     val_string_array.push_back("ZWRjYmE="); //"edcba" base_64_encode is "ZWRjYmE="
-    write_row.from_string(val_string_array);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
     for (uint32_t i = 0; i < 2; i++) {
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     }
 
     ColumnDataHeaderMessage header;
@@ -2197,7 +2438,7 @@ TEST_F(TestColumn, VectorizedDirectVarcharColumnWithoutPresent) {
 
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 5, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWJjZGU=", value->size) == 0);
     for (uint32_t i = 0; i < 2; i++) {
         value++;
@@ -2213,31 +2454,38 @@ TEST_F(TestColumn, VectorizedDirectVarcharColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedDirectVarcharColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 10, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithoutoutPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            10, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     
     std::vector<string> val_string_array;
     val_string_array.push_back("YWJjZGU="); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2256,39 +2504,48 @@ TEST_F(TestColumn, VectorizedDirectVarcharColumnWithPresent) {
     ASSERT_EQ(is_null[0], true);
     ASSERT_EQ(is_null[1], false);
 
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     value++;
     ASSERT_TRUE(strncmp(value->data, "YWJjZGU=", value->size) == 0);
 }
 
 TEST_F(TestColumn, SkipDirectVarcharColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 10, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            10, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("YWJjZGU="); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back("YWFhYWE="); //"aaaaa" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2306,40 +2563,49 @@ TEST_F(TestColumn, SkipDirectVarcharColumnWithPresent) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 1, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWFhYWE=", value->size) == 0);
 }
 
 TEST_F(TestColumn, SeekDirectVarcharColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 10, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            10, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("YWJjZGU="); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     _column_writer->create_row_index_entry();
     
     val_string_array.clear();
     val_string_array.push_back("YWFhYWE="); //"aaaaa" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     
     _column_writer->create_row_index_entry();
 
@@ -2370,47 +2636,56 @@ TEST_F(TestColumn, SeekDirectVarcharColumnWithoutPresent) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 1, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWJjZGU=", value->size) == 0);
 
     ASSERT_EQ(_column_reader->seek(&position1), OLAP_SUCCESS);
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 1, _mem_pool.get()), OLAP_SUCCESS);
-    value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWFhYWE=", value->size) == 0);
 }
 
 TEST_F(TestColumn, SeekDirectVarcharColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 10, 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            10, 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("YWJjZGU="); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     _column_writer->create_row_index_entry();
     
     val_string_array.clear();
     val_string_array.push_back("YWFhYWE="); //"aaaaa" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     
     _column_writer->create_row_index_entry();
 
@@ -2441,48 +2716,58 @@ TEST_F(TestColumn, SeekDirectVarcharColumnWithPresent) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 1, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWJjZGU=", value->size) == 0);
 
     ASSERT_EQ(_column_reader->seek(&position1), OLAP_SUCCESS);
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 1, _mem_pool.get()), OLAP_SUCCESS);
-    value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    value = reinterpret_cast<Slice*>(_col_vector->col_data());
     ASSERT_TRUE(strncmp(value->data, "YWFhYWE=", value->size) == 0);
 }
 
 TEST_F(TestColumn, VectorizedStringColumnWithoutPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("VarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_CHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 strlen("abcde"), 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "VarcharColumnWithoutoutPresent", 
+            "CHAR", 
+            "REPLACE", 
+            strlen("abcde"), 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
-    
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back("abcde"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     for (uint32_t i = 0; i < 2; i++) {
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     }
     val_string_array.clear();
     val_string_array.push_back("edcba"); //"edcba" base_64_encode is "ZWRjYmE="
-    write_row.from_string(val_string_array);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
     for (uint32_t i = 0; i < 2; i++) {
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
     }
 
     ColumnDataHeaderMessage header;
@@ -2498,7 +2783,7 @@ TEST_F(TestColumn, VectorizedStringColumnWithoutPresent) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 5, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
 
     ASSERT_TRUE(strncmp(value->data, "abcde", value->size) == 0);
     for (uint32_t i = 0; i < 2; i++) {
@@ -2515,30 +2800,36 @@ TEST_F(TestColumn, VectorizedStringColumnWithoutPresent) {
 
 TEST_F(TestColumn, VectorizedStringColumnWithPresent) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("VarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_CHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 strlen("abcde"), 
-                 true,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "VarcharColumnWithoutoutPresent", 
+            "CHAR", 
+            "REPLACE", 
+            strlen("abcde"), 
+            true,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     write_row.set_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(0, write_row);
     
     std::vector<string> val_string_array;
     val_string_array.push_back("abcde"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
+    OlapTuple tuple(val_string_array);
+    write_row.from_tuple(tuple);
     write_row.set_not_null(0);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    block.set_row(1, write_row);
+    block.finalize(2);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2557,50 +2848,71 @@ TEST_F(TestColumn, VectorizedStringColumnWithPresent) {
     ASSERT_EQ(is_null[0], true);
     ASSERT_EQ(is_null[1], false);
 
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
     value++;
     ASSERT_TRUE(strncmp(value->data, "abcde", value->size) == 0);
 }
 
 TEST_F(TestColumn, VectorizedStringColumnWithoutoutPresent2) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("VarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_CHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 20, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "VarcharColumnWithoutoutPresent", 
+            "CHAR", 
+            "REPLACE", 
+            20, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
+
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
     
     std::vector<string> val_string_array;
     val_string_array.push_back("abcde"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    write_row.from_tuple(tuple1);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
     val_string_array.clear();
     val_string_array.push_back("aaaaa"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
     val_string_array.clear();
     val_string_array.push_back("bbbbb"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple3(val_string_array);
+    write_row.from_tuple(tuple3);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
     val_string_array.clear();
     val_string_array.push_back("ccccc"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple4(val_string_array);
+    write_row.from_tuple(tuple4);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+
     val_string_array.clear();
     val_string_array.push_back("ddddd"); //"abcde" base_64_encode is "YWJjZGU="
-    write_row.from_string(val_string_array);
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple5(val_string_array);
+    write_row.from_tuple(tuple5);
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2615,7 +2927,7 @@ TEST_F(TestColumn, VectorizedStringColumnWithoutoutPresent2) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 5, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
 
     ASSERT_TRUE(strncmp(value->data, "abcde", value->size) == 0);
 
@@ -2634,34 +2946,42 @@ TEST_F(TestColumn, VectorizedStringColumnWithoutoutPresent2) {
 
 TEST_F(TestColumn, VectorizedDirectVarcharColumnWith65533) {
     // write data
-    std::vector<FieldInfo> tablet_schema;
-    FieldInfo field_info;
-    SetFieldInfo(field_info,
-                 std::string("DirectVarcharColumnWithoutoutPresent"), 
-                 OLAP_FIELD_TYPE_VARCHAR, 
-                 OLAP_FIELD_AGGREGATION_REPLACE, 
-                 65535, 
-                 false,
-                 true);
-    tablet_schema.push_back(field_info);
-
+    TabletSchema tablet_schema;
+    SetTabletSchemaWithOneColumn(
+            "DirectVarcharColumnWithoutoutPresent", 
+            "VARCHAR", 
+            "REPLACE", 
+            65535, 
+            false,
+            true, &tablet_schema);
     CreateColumnWriter(tablet_schema);
     
     RowCursor write_row;
     write_row.init(tablet_schema);
     write_row.allocate_memory_for_string_type(tablet_schema);
 
+    RowBlock block(&tablet_schema);
+    RowBlockInfo block_info;
+    block_info.row_num = 10000;
+    block.init(block_info);
+
     std::vector<string> val_string_array;
     val_string_array.push_back(std::string(65533, 'a')); 
-    ASSERT_EQ(OLAP_SUCCESS, write_row.from_string(val_string_array));
-    ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
+    OlapTuple tuple1(val_string_array);
+    ASSERT_EQ(OLAP_SUCCESS, write_row.from_tuple(tuple1));
+    block.set_row(0, write_row);
+    block.finalize(1);
+    ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
 
     val_string_array.clear();
     val_string_array.push_back("edcba"); //"edcba" base_64_encode is "ZWRjYmE="
-    write_row.from_string(val_string_array);
+    OlapTuple tuple2(val_string_array);
+    write_row.from_tuple(tuple2);
     for (uint32_t i = 0; i < 2; i++) {
-        ASSERT_EQ(_column_writer->write(&write_row), OLAP_SUCCESS);
-    }   
+        block.set_row(0, write_row);
+        block.finalize(1);
+        ASSERT_EQ(_column_writer->write_batch(&block, &write_row), OLAP_SUCCESS);
+    }
 
     ColumnDataHeaderMessage header;
     ASSERT_EQ(_column_writer->finalize(&header), OLAP_SUCCESS);
@@ -2676,7 +2996,7 @@ TEST_F(TestColumn, VectorizedDirectVarcharColumnWith65533) {
     _col_vector.reset(new ColumnVector());
     ASSERT_EQ(_column_reader->next_vector(
         _col_vector.get(), 3, _mem_pool.get()), OLAP_SUCCESS);
-    StringSlice* value = reinterpret_cast<StringSlice*>(_col_vector->col_data());
+    Slice* value = reinterpret_cast<Slice*>(_col_vector->col_data());
 
     for (uint32_t i = 0; i < 65533; i++) {
         ASSERT_TRUE(strncmp(value->data + i, "a", 1) == 0);
@@ -2689,18 +3009,15 @@ TEST_F(TestColumn, VectorizedDirectVarcharColumnWith65533) {
 }
 
 }
-}
 
 int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("PALO_HOME")) + "/conf/be.conf";
-    if (!palo::config::init(conffile.c_str(), false)) {
+    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
+    if (!doris::config::init(conffile.c_str(), false)) {
         fprintf(stderr, "error read config file. \n");
         return -1;
     }
-    palo::init_glog("be-test");
-    int ret = palo::OLAP_SUCCESS;
+    int ret = doris::OLAP_SUCCESS;
     testing::InitGoogleTest(&argc, argv);
     ret = RUN_ALL_TESTS();
     return ret;
 }
-

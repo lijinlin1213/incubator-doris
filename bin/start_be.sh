@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -17,16 +19,39 @@
 curdir=`dirname "$0"`
 curdir=`cd "$curdir"; pwd`
 
-export PALO_HOME=`cd "$curdir/.."; pwd`
+OPTS=$(getopt \
+  -n $0 \
+  -o '' \
+  -l 'daemon' \
+  -- "$@")
+
+eval set -- "$OPTS"
+
+RUN_DAEMON=0
+while true; do
+    case "$1" in
+        --daemon) RUN_DAEMON=1 ; shift ;;
+        --) shift ;  break ;;
+        *) ehco "Internal error" ; exit 1 ;;
+    esac
+done
+
+export DORIS_HOME=`cd "$curdir/.."; pwd`
 
 # export env variables from be.conf
 #
 # UDF_RUNTIME_DIR
 # LOG_DIR
 # PID_DIR
-export UDF_RUNTIME_DIR=${PALO_HOME}/lib/udf-runtime
-export LOG_DIR=${PALO_HOME}/log
+export UDF_RUNTIME_DIR=${DORIS_HOME}/lib/udf-runtime
+export LOG_DIR=${DORIS_HOME}/log
 export PID_DIR=`cd "$curdir"; pwd`
+
+# set odbc conf path
+export ODBCSYSINI=$DORIS_HOME/conf
+
+# support utf8 for oracle database
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 while read line; do
     envline=`echo $line | sed 's/[[:blank:]]*=[[:blank:]]*/=/g' | sed 's/^[[:blank:]]*//g' | egrep "^[[:upper:]]([[:upper:]]|_|[[:digit:]])*="`
@@ -34,10 +59,10 @@ while read line; do
     if [[ $envline == *"="* ]]; then
         eval 'export "$envline"'
     fi
-done < $PALO_HOME/conf/be.conf
+done < $DORIS_HOME/conf/be.conf
 
-if [ -e $PALO_HOME/bin/palo_env.sh ]; then
-    source $PALO_HOME/bin/palo_env.sh
+if [ -e $DORIS_HOME/bin/palo_env.sh ]; then
+    source $DORIS_HOME/bin/palo_env.sh
 fi
 
 if [ ! -d $LOG_DIR ]; then
@@ -53,15 +78,15 @@ rm -f ${UDF_RUNTIME_DIR}/*
 pidfile=$PID_DIR/be.pid
 
 if [ -f $pidfile ]; then
-    if kill -0 $(cat $pidfile); then
+    if kill -0 $(cat $pidfile) > /dev/null 2>&1; then
         echo "Backend running as process `cat $pidfile`. Stop it first."
         exit 1
     else
         rm $pidfile
     fi
 fi
- 
-chmod 755 ${PALO_HOME}/lib/palo_be
+
+chmod 755 ${DORIS_HOME}/lib/palo_be
 echo "start time: "$(date) >> $LOG_DIR/be.out
 
 if [ ! -f /bin/limit3 ]; then
@@ -70,4 +95,8 @@ else
     LIMIT="/bin/limit3 -c 0 -n 65536"
 fi
 
-nohup $LIMIT ${PALO_HOME}/lib/palo_be "$@" >> $LOG_DIR/be.out 2>&1 </dev/null &
+if [ ${RUN_DAEMON} -eq 1 ]; then
+    nohup $LIMIT ${DORIS_HOME}/lib/palo_be "$@" >> $LOG_DIR/be.out 2>&1 </dev/null &
+else
+    $LIMIT ${DORIS_HOME}/lib/palo_be "$@" >> $LOG_DIR/be.out 2>&1 </dev/null
+fi

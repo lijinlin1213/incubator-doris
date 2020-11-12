@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -19,8 +21,9 @@
 #include <vector>
 
 #include "common/logging.h"
+#include "util/spinlock.h"
 
-namespace palo {
+namespace doris {
 
 constexpr int BLOCK_SIZE = 4096;
 struct alignas(CACHE_LINE_SIZE) CoreDataBlock {
@@ -46,8 +49,11 @@ public:
     virtual ~CoreDataAllocatorImpl();
     void* get_or_create(size_t id) override {
         size_t block_id = id / ELEMENTS_PER_BLOCK;
-        if (block_id >= _blocks.size()) {
-            _blocks.resize(block_id + 1);
+        {
+            std::lock_guard<SpinLock> l(_lock);
+            if (block_id >= _blocks.size()) {
+                _blocks.resize(block_id + 1);
+            }
         }
         CoreDataBlock* block = _blocks[block_id];
         if (block == nullptr) {
@@ -59,6 +65,7 @@ public:
     }
 private:
     static constexpr int ELEMENTS_PER_BLOCK = BLOCK_SIZE / ELEMENT_BYTES;
+    SpinLock _lock; // lock to protect the modification of _blocks
     std::vector<CoreDataBlock*> _blocks;
 };
 

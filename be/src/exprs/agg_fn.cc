@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -20,25 +17,24 @@
 
 #include "exprs/agg_fn.h"
 
-#include "codegen/llvm_codegen.h"
 #include "exprs/anyval_util.h"
 #include "runtime/descriptors.h"
-#include "runtime/lib_cache.h"
+#include "runtime/user_function_cache.h"
 #include "runtime/runtime_state.h"
 
 #include "common/names.h"
 
-using namespace palo_udf;
-using namespace llvm;
+using namespace doris_udf;
 
-namespace palo {
+namespace doris {
 
 AggFn::AggFn(const TExprNode& tnode, const SlotDescriptor& intermediate_slot_desc,
     const SlotDescriptor& output_slot_desc)
   : Expr(tnode),
     is_merge_(tnode.agg_expr.is_merge_agg),
     intermediate_slot_desc_(intermediate_slot_desc),
-    output_slot_desc_(output_slot_desc) {
+    output_slot_desc_(output_slot_desc),
+    _vararg_start_idx(tnode.__isset.vararg_start_idx ? tnode.vararg_start_idx : -1) {
   // TODO(pengyubing) arg_type_descs_ is used for codegen
   //    arg_type_descs_(AnyValUtil::column_type_to_type_desc(
   //        TypeDescriptor::from_thrift(tnode.agg_expr.arg_types))) {
@@ -91,37 +87,47 @@ Status AggFn::Init(const RowDescriptor& row_desc, RuntimeState* state) {
     DCHECK_EQ(_fn.binary_type, TFunctionBinaryType::BUILTIN);
     stringstream ss;
     ss << "Function " << _fn.name.function_name << " is not implemented.";
-    return Status(ss.str());
+    return Status::InternalError(ss.str());
   }
 
-  RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-      aggregate_fn.init_fn_symbol, &init_fn_, &_cache_entry));
-  RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-      aggregate_fn.update_fn_symbol, &update_fn_, &_cache_entry));
+  RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+          _fn.id, aggregate_fn.init_fn_symbol,
+          _fn.hdfs_location, _fn.checksum, &init_fn_, &_cache_entry));
+  RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+          _fn.id, aggregate_fn.update_fn_symbol,
+          _fn.hdfs_location, _fn.checksum, &update_fn_, &_cache_entry));
 
   // Merge() is not defined for purely analytic function.
   if (!aggregate_fn.is_analytic_only_fn) {
-     RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-         aggregate_fn.merge_fn_symbol, &merge_fn_, &_cache_entry));
+     RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+             _fn.id, aggregate_fn.merge_fn_symbol,
+             _fn.hdfs_location, _fn.checksum, &merge_fn_, &_cache_entry));
   }
   // Serialize(), GetValue(), Remove() and Finalize() are optional
   if (!aggregate_fn.serialize_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-        aggregate_fn.serialize_fn_symbol, &serialize_fn_, &_cache_entry));
+    RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+            _fn.id, aggregate_fn.serialize_fn_symbol,
+            _fn.hdfs_location, _fn.checksum,
+            &serialize_fn_, &_cache_entry));
   }
   if (!aggregate_fn.get_value_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-        aggregate_fn.get_value_fn_symbol, &get_value_fn_, &_cache_entry));
+    RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+            _fn.id, aggregate_fn.get_value_fn_symbol, _fn.hdfs_location, _fn.checksum,
+            &get_value_fn_, &_cache_entry));
   }
   if (!aggregate_fn.remove_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-        aggregate_fn.remove_fn_symbol, &remove_fn_, &_cache_entry));
+    RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+            _fn.id, aggregate_fn.remove_fn_symbol,
+            _fn.hdfs_location, _fn.checksum,
+            &remove_fn_, &_cache_entry));
   }
   if (!aggregate_fn.finalize_fn_symbol.empty()) {
-    RETURN_IF_ERROR(LibCache::instance()->get_so_function_ptr(_fn.hdfs_location,
-        _fn.aggregate_fn.finalize_fn_symbol, &finalize_fn_, &_cache_entry));
+    RETURN_IF_ERROR(UserFunctionCache::instance()->get_function_ptr(
+            _fn.id, _fn.aggregate_fn.finalize_fn_symbol,
+            _fn.hdfs_location, _fn.checksum,
+            &finalize_fn_, &_cache_entry));
   }
-  return Status::OK;
+  return Status::OK();
 }
 
 Status AggFn::Create(const TExpr& texpr, const RowDescriptor& row_desc,
@@ -133,7 +139,7 @@ Status AggFn::Create(const TExpr& texpr, const RowDescriptor& row_desc,
   //TODO chenhao
   DCHECK_EQ(texpr_node.node_type, TExprNodeType::AGG_EXPR);
   if (!texpr_node.__isset.fn) {
-    return Status("Function not set in thrift AGGREGATE_EXPR node");
+    return Status::InternalError("Function not set in thrift AGGREGATE_EXPR node");
   }
   AggFn* new_agg_fn =
       pool->add(new AggFn(texpr_node, intermediate_slot_desc, output_slot_desc));
@@ -148,7 +154,7 @@ Status AggFn::Create(const TExpr& texpr, const RowDescriptor& row_desc,
     input_expr->assign_fn_ctx_idx(&fn_ctx_idx);
   }
   *agg_fn = new_agg_fn;
-  return Status::OK;
+  return Status::OK();
 }
 
 FunctionContext::TypeDesc AggFn::GetIntermediateTypeDesc() const {
@@ -158,31 +164,6 @@ FunctionContext::TypeDesc AggFn::GetIntermediateTypeDesc() const {
 FunctionContext::TypeDesc AggFn::GetOutputTypeDesc() const {
   return AnyValUtil::column_type_to_type_desc(output_slot_desc_.type());
 }
-
-//Status AggFn::CodegenUpdateOrMergeFunction(LlvmCodeGen* codegen, Function** uda_fn) {
-//  const string& symbol =
-//      is_merge_ ? fn_.aggregate_fn.merge_fn_symbol : _fn.aggregate_fn.update_fn_symbol;
-//  std::vector<TypeDescriptor> fn_arg_types;
-//  for (Expr* input_expr : children()) {
-//    fn_arg_types.push_back(input_expr->type());
-//  }
-//  // The intermediate value is passed as the last argument.
-//  fn_arg_types.push_back(intermediate_type());
-//  RETURN_IF_ERROR(codegen->LoadFunction(_fn, symbol, nullptr, fn_arg_types,
-//      fn_arg_types.size(), false, uda_fn, &_cache_entry));
-//
-//  // Inline constants into the function body (if there is an IR body).
-//  if (!(*uda_fn)->isDeclaration()) {
-//    // TODO: IMPALA-4785: we should also replace references to GetIntermediateType()
-//    // with constants.
-//    codegen->InlineConstFnAttrs(GetOutputTypeDesc(), arg_type_descs_, *uda_fn);
-//    *uda_fn = codegen->FinalizeFunction(*uda_fn);
-//    if (*uda_fn == nullptr) {
-//      return Status(TErrorCode::UDF_VERIFY_FAILED, symbol, fn_.hdfs_location);
-//    }
-//  }
-//  return Status::OK;
-//}
 
 void AggFn::Close() {
   // This also closes all the input expressions.

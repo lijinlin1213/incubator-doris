@@ -1,5 +1,3 @@
-# Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -34,15 +32,22 @@ add_library(Webserver STATIC
   web_page_handler.cpp
   monitor_action.cpp
   default_path_handlers.cpp
+  utils.cpp
   ev_http_server.cpp
-  action/compaction_action.cpp
+  http_client.cpp
   action/mini_load.cpp
   action/health_action.cpp
+  action/tablets_info_action.cpp
   action/checksum_action.cpp
   action/snapshot_action.cpp
   action/reload_tablet_action.cpp
+  action/restore_tablet_action.cpp
   action/pprof_actions.cpp
   action/metrics_action.cpp
+  action/stream_load.cpp
+  action/meta_action.cpp
+  action/compaction_action.cpp
+  action/update_config_action.cpp
   #  action/multi_start.cpp
   #  action/multi_show.cpp
   #  action/multi_commit.cpp

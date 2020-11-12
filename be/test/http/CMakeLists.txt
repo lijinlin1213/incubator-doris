@@ -1,8 +1,10 @@
-# Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -17,3 +19,7 @@
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_DIR}/test/http")
 
 ADD_BE_TEST(metrics_action_test)
+ADD_BE_TEST(message_body_sink_test)
+ADD_BE_TEST(http_utils_test)
+ADD_BE_TEST(stream_load_test)
+ADD_BE_TEST(http_client_test)

@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -23,10 +25,11 @@
 #include "util/path_trie.hpp"
 #include "http/http_method.h"
 
-namespace palo {
+namespace doris {
 
 class HttpHandler;
 class HttpRequest;
+class ThreadPool;
 
 class EvHttpServer {
 public:
@@ -37,12 +40,20 @@ public:
     // register handler for an a path-method pair
     bool register_handler(
         const HttpMethod& method, const std::string& path, HttpHandler* handler);
-    Status start();
+
+    void register_static_file_handler(HttpHandler* handler);
+
+    void start();
     void stop();
     void join();
 
     // callback 
     int on_header(struct evhttp_request* ev_req);
+
+    // get real port
+    int get_real_port() {
+        return _real_port;
+    }
 
 private:
     Status _bind();
@@ -53,13 +64,17 @@ private:
     std::string _host;
     int _port;
     int _num_workers;
+    // used for unittest, set port to 0, os will choose a free port;
+    int _real_port;
 
     int _server_fd = -1;
-    std::vector<std::thread> _workers;
+    std::unique_ptr<ThreadPool> _workers;
+    std::vector<std::shared_ptr<event_base>> event_bases;
 
     pthread_rwlock_t _rw_lock;
 
     PathTrie<HttpHandler*> _get_handlers;
+    HttpHandler* _static_file_handler = nullptr;
     PathTrie<HttpHandler*> _put_handlers;
     PathTrie<HttpHandler*> _post_handlers;
     PathTrie<HttpHandler*> _delete_handlers;

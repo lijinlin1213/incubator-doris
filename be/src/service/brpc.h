@@ -1,8 +1,10 @@
-// Copyright (c) 2018, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -18,7 +20,7 @@
 // This file is used to fixed macro conflict between butil and gutil
 // all header need by brpc is contain in this file.
 // include this file instead of include <brpc/xxx.h>
-// and this file must put the first include in soure file
+// and this file must put the first include in source file
 
 #include "gutil/macros.h"
 // Macros in the guti/macros.h, use butil's define
@@ -39,8 +41,6 @@
 #define BUTIL_BASICTYPES_H_
 #endif
 
-#include "gutil/logging-inl.h"
-
 #ifdef DEBUG_MODE
 #undef DEBUG_MODE
 #endif
@@ -53,3 +53,6 @@
 #include <butil/macros.h>
 #include <brpc/controller.h>
 #include <brpc/server.h>
+#include <brpc/closure_guard.h>
+#include <brpc/reloadable_flags.h>
+#include <brpc/protocol.h>

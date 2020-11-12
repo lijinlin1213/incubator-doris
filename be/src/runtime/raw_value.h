@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_RAW_VALUE_H
-#define BDG_PALO_BE_RUNTIME_RAW_VALUE_H
+#ifndef DORIS_BE_RUNTIME_RAW_VALUE_H
+#define DORIS_BE_RUNTIME_RAW_VALUE_H
 
 #include <string>
 
@@ -31,7 +28,7 @@
 #include "util/hash_util.hpp"
 #include "util/types.h"
 
-namespace palo {
+namespace doris {
 
 class MemPool;
 class SlotDescriptor;
@@ -170,6 +167,10 @@ inline bool RawValue::lt(const void* v1, const void* v2, const TypeDescriptor& t
         return *reinterpret_cast<const DecimalValue*>(v1) <
                *reinterpret_cast<const DecimalValue*>(v2);
 
+    case TYPE_DECIMALV2:
+        return reinterpret_cast<const PackedInt128*>(v1)->value <
+               reinterpret_cast<const PackedInt128*>(v2)->value;
+
     case TYPE_LARGEINT:
         return reinterpret_cast<const PackedInt128*>(v1)->value <
                reinterpret_cast<const PackedInt128*>(v2)->value;
@@ -227,6 +228,10 @@ inline bool RawValue::eq(const void* v1, const void* v2, const TypeDescriptor& t
     case TYPE_DECIMAL:
         return *reinterpret_cast<const DecimalValue*>(v1) ==
                *reinterpret_cast<const DecimalValue*>(v2);
+
+    case TYPE_DECIMALV2:
+        return reinterpret_cast<const PackedInt128*>(v1)->value ==
+               reinterpret_cast<const PackedInt128*>(v2)->value;
 
     case TYPE_LARGEINT:
         return reinterpret_cast<const PackedInt128*>(v1)->value ==
@@ -288,6 +293,9 @@ inline uint32_t RawValue::get_hash_value(
     case TYPE_DECIMAL:
         return HashUtil::hash(v, 40, seed);
 
+    case TYPE_DECIMALV2:
+        return HashUtil::hash(v, 16, seed);
+
     case TYPE_LARGEINT:
         return HashUtil::hash(v, 16, seed);
 
@@ -343,6 +351,9 @@ inline uint32_t RawValue::get_hash_value_fvn(
     case TYPE_DECIMAL:
         return ((DecimalValue *) v)->hash(seed);
 
+    case TYPE_DECIMALV2:
+        return HashUtil::fnv_hash(v, 16, seed);
+
     case TYPE_LARGEINT:
         return HashUtil::fnv_hash(v, 16, seed);
 
@@ -352,7 +363,7 @@ inline uint32_t RawValue::get_hash_value_fvn(
     }
 }
 
-// NOTE: this is just for split data, decimal use old palo hash function
+// NOTE: this is just for split data, decimal use old doris hash function
 // Because crc32 hardware is not equal with zlib crc32
 inline uint32_t RawValue::zlib_crc32(const void* v, const TypeDescriptor& type, uint32_t seed) {
     // Hash_combine with v = 0
@@ -404,6 +415,14 @@ inline uint32_t RawValue::zlib_crc32(const void* v, const TypeDescriptor& type, 
     }
     case TYPE_DECIMAL: {
         const DecimalValue* dec_val = (const DecimalValue*)v;
+        int64_t int_val = dec_val->int_value();
+        int32_t frac_val = dec_val->frac_value();
+        seed = HashUtil::zlib_crc_hash(&int_val, sizeof(int_val), seed);
+        return HashUtil::zlib_crc_hash(&frac_val, sizeof(frac_val), seed);
+    }
+
+    case TYPE_DECIMALV2: {
+        const DecimalV2Value* dec_val = (const DecimalV2Value*)v;
         int64_t int_val = dec_val->int_value();
         int32_t frac_val = dec_val->frac_value();
         seed = HashUtil::zlib_crc_hash(&int_val, sizeof(int_val), seed);

@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,13 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef  BDG_PALO_BE_SRC_QUERY_MYSQL_MYSQL_GLOBAL_H
-#define  BDG_PALO_BE_SRC_QUERY_MYSQL_MYSQL_GLOBAL_H
+#pragma once
 
 #include <stdint.h>
 #include <float.h>
 
-namespace palo {
+namespace doris {
 
 typedef unsigned char uchar;
 
@@ -43,19 +39,18 @@ typedef unsigned char uchar;
 #define MAX_MEDIUMINT_WIDTH     8       	/* Max width for a INT24 w.o. sign */
 #define MAX_INT_WIDTH           10      	/* Max width for a LONG w.o. sign */
 #define MAX_BIGINT_WIDTH        20      	/* Max width for a LONGLONG */
-#define MAX_CHAR_WIDTH          255			/* Max length for a CHAR colum */
+#define MAX_CHAR_WIDTH          255			/* Max length for a CHAR column */
 #define MAX_BLOB_WIDTH          16777216	/* Default width for blob */
 			
 #define MAX_DECPT_FOR_F_FORMAT	DBL_DIG
 #define MAX_DATETIME_WIDTH		19          /* YYYY-MM-DD HH:MM:SS */
 		
 /* -[digits].E+## */
-#define MAX_FLOAT_STR_LENGTH	(FLT_DIG + 6)
+#define MAX_FLOAT_STR_LENGTH	24  // see gutil/strings/numbers.h kFloatToBufferSize
 /* -[digits].E+### */
-#define MAX_DOUBLE_STR_LENGTH	(DBL_DIG + 7)
+#define MAX_DOUBLE_STR_LENGTH	32  // see gutil/strings/numbers.h kDoubleToBufferSize
 
 /* -[digits].[frac] */
 #define MAX_DECIMAL_STR_LENGTH   29
 
-#endif  //_PALO_BE_SRC_QUERY_MYSQL_MYSQL_GLOBAL_H_
 }

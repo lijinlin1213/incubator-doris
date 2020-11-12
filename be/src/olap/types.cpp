@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -15,21 +17,27 @@
 
 #include "olap/types.h"
 
-namespace palo {
+namespace doris {
+
+void (*FieldTypeTraits<OLAP_FIELD_TYPE_CHAR>::set_to_max)(void*) = nullptr;
 
 template<typename TypeTraitsClass>
 TypeInfo::TypeInfo(TypeTraitsClass t)
       : _equal(TypeTraitsClass::equal),
         _cmp(TypeTraitsClass::cmp),
-        _copy_with_pool(TypeTraitsClass::copy_with_pool),
-        _copy_without_pool(TypeTraitsClass::copy_without_pool),
+        _shallow_copy(TypeTraitsClass::shallow_copy),
+        _deep_copy(TypeTraitsClass::deep_copy),
+        _copy_object(TypeTraitsClass::copy_object),
+        _direct_copy(TypeTraitsClass::direct_copy),
+        _convert_from(TypeTraitsClass::convert_from),
         _from_string(TypeTraitsClass::from_string),
         _to_string(TypeTraitsClass::to_string),
         _set_to_max(TypeTraitsClass::set_to_max),
         _set_to_min(TypeTraitsClass::set_to_min),
-        _is_min(TypeTraitsClass::is_min),
         _hash_code(TypeTraitsClass::hash_code),
-        _size(TypeTraitsClass::size) {}
+        _size(TypeTraitsClass::size),
+        _field_type(TypeTraitsClass::type) {
+}
 
 class TypeInfoResolver {
     DECLARE_SINGLETON(TypeInfoResolver);
@@ -58,6 +66,8 @@ TypeInfoResolver::TypeInfoResolver() {
     add_mapping<OLAP_FIELD_TYPE_TINYINT>();
     add_mapping<OLAP_FIELD_TYPE_SMALLINT>();
     add_mapping<OLAP_FIELD_TYPE_INT>();
+    add_mapping<OLAP_FIELD_TYPE_UNSIGNED_INT>();
+    add_mapping<OLAP_FIELD_TYPE_BOOL>();
     add_mapping<OLAP_FIELD_TYPE_BIGINT>();
     add_mapping<OLAP_FIELD_TYPE_LARGEINT>();
     add_mapping<OLAP_FIELD_TYPE_FLOAT>();
@@ -68,12 +78,13 @@ TypeInfoResolver::TypeInfoResolver() {
     add_mapping<OLAP_FIELD_TYPE_CHAR>();
     add_mapping<OLAP_FIELD_TYPE_VARCHAR>();
     add_mapping<OLAP_FIELD_TYPE_HLL>();
+    add_mapping<OLAP_FIELD_TYPE_OBJECT>();
 }
 
 TypeInfoResolver::~TypeInfoResolver() {}
 
 TypeInfo* get_type_info(FieldType field_type) {
-    return TypeInfoResolver::get_instance()->get_type_info(field_type);
+    return TypeInfoResolver::instance()->get_type_info(field_type);
 }
 
-} // namespace palo
+} // namespace doris

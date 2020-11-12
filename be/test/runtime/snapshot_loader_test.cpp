@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -19,12 +21,12 @@
 #include "runtime/exec_env.h"
 #include "util/cpu_info.h"
 
-#define private public  // hack complier
+#define private public  // hack compiler
 #define protected public
 
 #include "runtime/snapshot_loader.h"
 
-namespace palo {
+namespace doris {
 
 class SnapshotLoaderTest : public testing::Test {
 public:
@@ -35,7 +37,7 @@ private:
 };
 
 TEST_F(SnapshotLoaderTest, NormalCase) {
-    SnapshotLoader loader(_exec_env);
+    SnapshotLoader loader(_exec_env, 1L, 2L);
 
     ASSERT_TRUE(loader._end_with("abt.dat", ".dat"));
     ASSERT_FALSE(loader._end_with("abt.dat", ".da"));
@@ -88,11 +90,11 @@ TEST_F(SnapshotLoaderTest, NormalCase) {
 
     st = loader._replace_tablet_id("1234_2_5_12345_1.dat", 5678, &new_name);
     ASSERT_TRUE(st.ok());
-    ASSERT_EQ("5678_2_5_12345_1.dat", new_name);
+    ASSERT_EQ("1234_2_5_12345_1.dat", new_name);
 
     st = loader._replace_tablet_id("1234_2_5_12345_1.idx", 5678, &new_name);
     ASSERT_TRUE(st.ok());
-    ASSERT_EQ("5678_2_5_12345_1.idx", new_name);
+    ASSERT_EQ("1234_2_5_12345_1.idx", new_name);
 
     st = loader._replace_tablet_id("1234_2_5_12345_1.xxx", 5678, &new_name);
     ASSERT_FALSE(st.ok());
@@ -108,12 +110,12 @@ TEST_F(SnapshotLoaderTest, NormalCase) {
 }
 
 int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("PALO_HOME")) + "/conf/be.conf";
-    if (!palo::config::init(conffile.c_str(), false)) {
+    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
+    if (!doris::config::init(conffile.c_str(), false)) {
         fprintf(stderr, "error read config file. \n");
         return -1;
     }
-    palo::CpuInfo::init();
+    doris::CpuInfo::init();
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

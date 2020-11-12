@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_BUFFER_ALLOCATOR_H
-#define BDG_PALO_BE_RUNTIME_BUFFER_ALLOCATOR_H
+#ifndef DORIS_BE_RUNTIME_BUFFER_ALLOCATOR_H
+#define DORIS_BE_RUNTIME_BUFFER_ALLOCATOR_H
 
 #include <boost/scoped_ptr.hpp>
 
@@ -27,7 +24,7 @@
 #include "runtime/bufferpool/free_list.h"
 #include "util/aligned_new.h"
 
-namespace palo {
+namespace doris {
 
 /// The internal buffer allocator used by BufferPool to allocator power-of-two sized
 /// buffers. BufferAllocator builds on top of SystemAllocator by adding caching of
@@ -48,7 +45,7 @@ namespace palo {
 /// guaranteed to succeed unless an unexpected system error occurs (e.g. we can't allocate
 /// all of the required memory from the OS). Reservations must be set up so that the total
 /// of all reservations does not exceed 'system_bytes_limit', thus ensuring that
-/// BufferAllocator can alway find memory to fulfill reservations.
+/// BufferAllocator can always find memory to fulfill reservations.
 ///
 /// +========================+
 /// | IMPLEMENTATION NOTES   |

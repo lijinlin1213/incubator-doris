@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -18,7 +20,7 @@
 #include <map>
 #include <string>
 
-namespace palo {
+namespace doris {
 
 static std::map<HttpStatus, std::string> s_reason_map = {
     { HttpStatus::CONTINUE,                         "Continue" },
@@ -63,7 +65,7 @@ static std::map<HttpStatus, std::string> s_reason_map = {
     { HttpStatus::HTTP_VERSION_NOT_SUPPORTED,       "HTTP Version not supported" }
 };
 
-std::string defalut_reason(const HttpStatus& status) {
+std::string default_reason(const HttpStatus& status) {
     auto iter = s_reason_map.find(status);
     if (iter != s_reason_map.end()) {
         return iter->second;

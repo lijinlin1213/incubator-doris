@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -31,11 +28,10 @@
 #include "runtime/raw_value.h"
 #include "udf/udf_internal.h"
 #include "util/debug_util.h"
+#include "util/stack_util.h"
 #include "exprs/anyval_util.h"
 
-namespace palo {
-
-const char* ExprContext::_s_llvm_class_name = "class.palo::ExprContext";
+namespace doris {
 
 ExprContext::ExprContext(Expr* root) :
         _fn_contexts_ptr(NULL),
@@ -55,20 +51,20 @@ ExprContext::~ExprContext() {
 
 // TODO(zc): memory tracker
 Status ExprContext::prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                            MemTracker* tracker) {
-    DCHECK(tracker != NULL) << std::endl << get_stack_trace();
+                            const std::shared_ptr<MemTracker>& tracker) {
+    DCHECK(tracker != nullptr) << std::endl << get_stack_trace();
     DCHECK(_pool.get() == NULL);
     _prepared = true;
-    // TODO: use param tracker to replace instance_mem_tracker
+    // TODO: use param tracker to replace instance_mem_tracker, be careful about tracker's life cycle
     // _pool.reset(new MemPool(new MemTracker(-1)));
-    _pool.reset(new MemPool(state->instance_mem_tracker()));
+    _pool.reset(new MemPool(state->instance_mem_tracker().get()));
     return _root->prepare(state, row_desc, this);
 }
 
 Status ExprContext::open(RuntimeState* state) {
     DCHECK(_prepared);
     if (_opened) {
-        return Status::OK;
+        return Status::OK();
     }
     _opened = true;
     // Fragment-local state is only initialized for original contexts. Clones inherit the
@@ -83,7 +79,7 @@ Status ExprContext::open(std::vector<ExprContext*> evals, RuntimeState* state) {
     for (int i = 0; i < evals.size(); ++i) {
         RETURN_IF_ERROR(evals[i]->open(state));
     }
-    return Status::OK;
+    return Status::OK();
 }
 
 void ExprContext::close(RuntimeState* state) {
@@ -104,8 +100,8 @@ void ExprContext::close(RuntimeState* state) {
 
 int ExprContext::register_func(
         RuntimeState* state,
-        const palo_udf::FunctionContext::TypeDesc& return_type,
-        const std::vector<palo_udf::FunctionContext::TypeDesc>& arg_types,
+        const doris_udf::FunctionContext::TypeDesc& return_type,
+        const std::vector<doris_udf::FunctionContext::TypeDesc>& arg_types,
         int varargs_buffer_size) {
     _fn_contexts.push_back(FunctionContextImpl::create_context(
             state, _pool.get(), return_type, arg_types, varargs_buffer_size, false));
@@ -271,7 +267,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return NULL;
     }
     case TYPE_BOOLEAN: {
-        palo_udf::BooleanVal v = e->get_boolean_val(this, row);
+        doris_udf::BooleanVal v = e->get_boolean_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -279,7 +275,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.bool_val;
     }
     case TYPE_TINYINT: {
-        palo_udf::TinyIntVal v = e->get_tiny_int_val(this, row);
+        doris_udf::TinyIntVal v = e->get_tiny_int_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -287,7 +283,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.tinyint_val;
     }
     case TYPE_SMALLINT: {
-        palo_udf::SmallIntVal v = e->get_small_int_val(this, row);
+        doris_udf::SmallIntVal v = e->get_small_int_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -295,7 +291,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.smallint_val;
     }
     case TYPE_INT: {
-        palo_udf::IntVal v = e->get_int_val(this, row);
+        doris_udf::IntVal v = e->get_int_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -303,7 +299,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.int_val;
     }
     case TYPE_BIGINT: {
-        palo_udf::BigIntVal v = e->get_big_int_val(this, row);
+        doris_udf::BigIntVal v = e->get_big_int_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -311,7 +307,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.bigint_val;
     }
     case TYPE_LARGEINT: {
-        palo_udf::LargeIntVal v = e->get_large_int_val(this, row);
+        doris_udf::LargeIntVal v = e->get_large_int_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -319,15 +315,16 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.large_int_val;
     }
     case TYPE_FLOAT: {
-        palo_udf::FloatVal v = e->get_float_val(this, row);
+        doris_udf::FloatVal v = e->get_float_val(this, row);
         if (v.is_null) {
             return NULL;
         }
         _result.float_val = v.val;
         return &_result.float_val;
     }
+    case TYPE_TIME:
     case TYPE_DOUBLE: {
-        palo_udf::DoubleVal v = e->get_double_val(this, row);
+        doris_udf::DoubleVal v = e->get_double_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -336,10 +333,11 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
     }
     case TYPE_CHAR:
     case TYPE_VARCHAR:
-    case TYPE_HLL: {
-        palo_udf::StringVal v = e->get_string_val(this, row);
+    case TYPE_HLL:
+    case TYPE_OBJECT: {
+        doris_udf::StringVal v = e->get_string_val(this, row);
         if (v.is_null) {
-            return NULL;
+            return nullptr;
         }
         _result.string_val.ptr = reinterpret_cast<char*>(v.ptr);
         _result.string_val.len = v.len;
@@ -347,7 +345,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
     }
 #if 0
     case TYPE_CHAR: {
-        palo_udf::StringVal v = e->get_string_val(this, row);
+        doris_udf::StringVal v = e->get_string_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -362,7 +360,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
 #endif
     case TYPE_DATE:
     case TYPE_DATETIME: {
-        palo_udf::DateTimeVal v = e->get_datetime_val(this, row);
+        doris_udf::DateTimeVal v = e->get_datetime_val(this, row);
         if (v.is_null) {
             return NULL;
         }
@@ -377,10 +375,18 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         _result.decimal_val = DecimalValue::from_decimal_val(v);
         return &_result.decimal_val;
     }
+    case TYPE_DECIMALV2: {
+        DecimalV2Val v = e->get_decimalv2_val(this, row);
+        if (v.is_null) {
+            return NULL;
+        }
+        _result.decimalv2_val = DecimalV2Value::from_decimal_val(v);
+        return &_result.decimalv2_val;
+    }
 #if 0
     case TYPE_ARRAY:
     case TYPE_MAP: {
-        palo_udf::ArrayVal v = e->GetArrayVal(this, row);
+        doris_udf::ArrayVal v = e->GetArrayVal(this, row);
         if (v.is_null) return NULL;
         _result.array_val.ptr = v.ptr;
         _result.array_val.num_tuples = v.num_tuples;
@@ -454,12 +460,16 @@ DecimalVal ExprContext::get_decimal_val(TupleRow* row) {
     return _root->get_decimal_val(this, row);
 }
 
+DecimalV2Val ExprContext::get_decimalv2_val(TupleRow* row) {
+    return _root->get_decimalv2_val(this, row);
+}
+
 Status ExprContext::get_const_value(RuntimeState* state, Expr& expr,
     AnyVal** const_val) {
   DCHECK(_opened);
   if (!expr.is_constant()) {
     *const_val = nullptr;
-    return Status::OK;
+    return Status::OK();
   }
 
   // A constant expression shouldn't have any SlotRefs expr in it.
@@ -469,7 +479,7 @@ Status ExprContext::get_const_value(RuntimeState* state, Expr& expr,
   ObjectPool* obj_pool = state->obj_pool();
   *const_val = create_any_val(obj_pool, result_type);
   if (*const_val == NULL) {
-      return Status("Could not create any val");
+      return Status::InternalError("Could not create any val");
   }
 
   const void* result = ExprContext::get_value(&expr, nullptr);
@@ -499,8 +509,24 @@ Status ExprContext::get_error(int start_idx, int end_idx) const {
   for (int idx = start_idx; idx < end_idx; ++idx) {
     DCHECK_LT(idx, _fn_contexts.size());
     FunctionContext* fn_ctx = _fn_contexts[idx];
-    if (fn_ctx->has_error()) return Status(fn_ctx->error_msg());
+    if (fn_ctx->has_error()) return Status::InternalError(fn_ctx->error_msg());
   }
-  return Status::OK;
+  return Status::OK();
 }
+
+std::string ExprContext::get_error_msg() const {
+    for (auto fn_ctx: _fn_contexts) {
+        if (fn_ctx->has_error()) {
+            return std::string(fn_ctx->error_msg());
+        }
+    }
+    return "";
+}
+
+void ExprContext::clear_error_msg() {
+    for (auto fn_ctx: _fn_contexts) {
+        fn_ctx->clear_error_msg();
+    }
+}
+
 }

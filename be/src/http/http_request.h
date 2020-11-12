@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -13,23 +15,30 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
-#define BDG_PALO_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
+#ifndef DORIS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
+#define DORIS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
 
 #include <map>
 #include <string>
 
+#include <boost/algorithm/string.hpp>
+#include <glog/logging.h>
+
+#include "http/http_common.h"
+#include "http/http_headers.h"
 #include "http/http_method.h"
+#include "util/string_util.h"
 
 struct mg_connection;
 struct evhttp_request;
 
-namespace palo {
+namespace doris {
 
 class HttpHandler;
 
 class HttpRequest {
 public:
+    
     HttpRequest(evhttp_request* ev_req);
 
     ~HttpRequest();
@@ -55,7 +64,7 @@ public:
     const std::string& param(const std::string& key) const;
 
     // return params
-    const std::map<std::string, std::string>& headers() {
+    const StringCaseUnorderedMap<std::string>& headers() {
         return _headers;
     }
 
@@ -80,13 +89,19 @@ public:
     struct evhttp_request* get_evhttp_request() const { return _ev_req; }
 
     void* handler_ctx() const { return _handler_ctx; }
-    void set_handler_ctx(void* ctx) { _handler_ctx = ctx; }
+    void set_handler_ctx(void* ctx) {
+        DCHECK(_handler != nullptr);
+        _handler_ctx = ctx;
+    }
+
+    const char* remote_host() const;
 
 private:
     HttpMethod _method;
     std::string _uri;
     std::string _raw_path;
-    std::map<std::string, std::string> _headers;
+
+    StringCaseUnorderedMap<std::string> _headers;
     std::map<std::string, std::string> _params;
     std::map<std::string, std::string> _query_params;
 

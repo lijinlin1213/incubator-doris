@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -14,6 +16,7 @@
 // under the License.
 
 #include "runtime/datetime_value.h"
+#include "util/timezone_utils.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -24,9 +27,7 @@
 
 #include "common/logging.h"
 
-namespace palo {
-
-const char* DateTimeValue::_s_llvm_class_name = "class.palo::DateTimeValue";
+namespace doris {
 
 const uint64_t log_10_int[] = {
     1, 10, 100, 1000, 10000UL, 100000UL, 1000000UL, 10000000UL,
@@ -64,20 +65,7 @@ static uint32_t calc_days_in_year(uint32_t year) {
 DateTimeValue DateTimeValue::_s_min_datetime_value(0, TIME_DATETIME, 0, 0, 0, 0, 0, 1, 1);
 DateTimeValue DateTimeValue::_s_max_datetime_value(0, TIME_DATETIME, 23, 59, 59, 0, 
                                                    9999, 12, 31);
-// jint length_of_str(DateTimeValue& value) {
-// j    if (_type == TIME_DATE) {
-// j        return 10;
-// j    } else {
-// j        int extra_len = (_microsecond == 0) ? 0 : 7;
-// j        if (_type == TIME_DATETIME) {
-// j            return 19 + extra_len;
-// j        } else {
-// j            // TIME
-// j            return 8 + extra_len + _neg 
-// j                    + (_hour > 100) ? 1 : 0;
-// j        }
-// j    }
-// j}
+RE2 DateTimeValue::time_zone_offset_format_reg("^[+-]{1}\\d{2}\\:\\d{2}$");
 
 bool DateTimeValue::check_range() const {
     return _year > 9999 || _month > 12 || _day > 31 
@@ -86,10 +74,7 @@ bool DateTimeValue::check_range() const {
 }
 
 bool DateTimeValue::check_date() const {
-    if (_month == 0 || _day == 0) {
-        return true;
-    }
-    if (_day > s_days_in_month[_month]) {
+    if (_month != 0 && _day > s_days_in_month[_month]) {
         // Feb 29 in leap year is valid.
         if (_month == 2 && _day == 29 && is_leap(_year)) {
             return false;
@@ -241,7 +226,7 @@ bool DateTimeValue::from_date_str(const char* date_str, int len) {
 // ((YY_PART_YEAR - 1)##1231235959, YY_PART_YEAR##0101000000) invalid
 // ((YY_PART_YEAR)##1231235959, 99991231235959] two digits year datetime value 1970 ~ 1999
 // (999991231235959, ~) valid
-int64_t DateTimeValue::standardlize_timevalue(int64_t value) {
+int64_t DateTimeValue::standardize_timevalue(int64_t value) {
     _type = TIME_DATE;
     if (value <= 0) {
         return 0;
@@ -304,7 +289,7 @@ int64_t DateTimeValue::standardlize_timevalue(int64_t value) {
 
 bool DateTimeValue::from_date_int64(int64_t value) {
     _neg = false;
-    value = standardlize_timevalue(value);
+    value = standardize_timevalue(value);
     if (value <= 0) {
         return false;
     }
@@ -599,7 +584,7 @@ static char* append_with_prefix(const char* str, int str_len,
     return to;
 }
 
-int DateTimeValue::compute_format_len(const char* format, int len) const {
+int DateTimeValue::compute_format_len(const char* format, int len) {
     int size = 0;
     const char* ptr = format;
     const char* end = format + len;
@@ -1085,6 +1070,8 @@ static int check_word(const char* lib[], const char* str, const char* end, const
     return pos;
 }
 
+// this method is exactly same as fromDateFormatStr() in DateLiteral.java in FE
+// change this method should also change that.
 bool DateTimeValue::from_date_format_str(
         const char* format, int format_len,
         const char* value, int value_len,
@@ -1108,6 +1095,7 @@ bool DateTimeValue::from_date_format_str(
     bool strict_week_number_year_type = false;
     int strict_week_number_year = -1;
     bool usa_time = false;
+
     while (ptr < end && val < val_end) {
         // Skip space character
         while (val < val_end && isspace(*val)) {
@@ -1326,14 +1314,14 @@ bool DateTimeValue::from_date_format_str(
                 date_part_used = true;
                 break;
             case 'r':
-                if (from_date_format_str("%I:%i:%S %p", 11, val, val_end - val, &tmp)) {
+                if (!from_date_format_str("%I:%i:%S %p", 11, val, val_end - val, &tmp)) {
                     return false;
                 }
                 val = tmp;
                 time_part_used = true;
                 break;
             case 'T':
-                if (from_date_format_str("%H:%i:%S", 8, val, val_end - val, &tmp)) {
+                if (!from_date_format_str("%H:%i:%S", 8, val, val_end - val, &tmp)) {
                     return false;
                 }
                 time_part_used = true;
@@ -1354,6 +1342,12 @@ bool DateTimeValue::from_date_format_str(
                     val++;
                 }
                 break;
+            case '%': // %%, escape the %
+                if ('%' != *val) {
+                    return false;
+                }
+                val++;
+                break;
             default:
                 return false;
             }
@@ -1368,6 +1362,33 @@ bool DateTimeValue::from_date_format_str(
         }
     }
 
+    // continue to iterate pattern if has
+    // to find out if it has time part.
+    while (ptr < end) {
+        if (*ptr == '%' && ptr + 1 < end) {
+            ptr++;
+            switch (*ptr++) {
+                case 'H':
+                case 'h':
+                case 'I':
+                case 'i':
+                case 'k':
+                case 'l':
+                case 'r':
+                case 's':
+                case 'S':
+                case 'p':
+                case 'T':
+                    time_part_used = true;
+                    break;
+                default:
+                    break;               
+            }
+        } else {
+            ptr++;
+        }
+    }
+
     if (usa_time) {
         if (_hour > 12 || _hour < 1) {
             return false;
@@ -1376,7 +1397,7 @@ bool DateTimeValue::from_date_format_str(
     }
     if (sub_val_end) {
         *sub_val_end = val;
-        return 0;
+        return true;
     }
     // Year day
     if (yearday > 0) {
@@ -1522,43 +1543,46 @@ bool DateTimeValue::date_add_interval(const TimeInterval& interval, TimeUnit uni
     return true;
 }
 
-int DateTimeValue::unix_timestamp() const {
-    int64_t days = daynr() - calc_daynr(1970, 1, 1);
-    if (days < 0) {
-        return 0;
-    }
-    int64_t seconds = days * 86400 + _hour * 3600 + _minute * 60 + _second;
-    if (seconds > std::numeric_limits<int>::max()) {
-        return 0;
-    }
-    // TODO(zc): we only support Beijing Timezone, so minus 28800
-    seconds -= 28800;
-    if (seconds < 0) {
-        return 0;
-    }
-    return seconds;
-}
-
-bool DateTimeValue::from_unixtime(int seconds) {
-    if (seconds < 0) {
+bool DateTimeValue::unix_timestamp(int64_t* timestamp, const std::string& timezone) const{
+    cctz::time_zone ctz;
+    if (!TimezoneUtils::find_cctz_time_zone(timezone, ctz)) {
         return false;
     }
-    // TODO(zc): we only support Beijing Timezone, so add 28800
-    seconds += 28800;
-    int64_t days = seconds / 86400 + calc_daynr(1970, 1, 1);
+    return unix_timestamp(timestamp, ctz);
+}
 
-    _neg = false;
-    get_date_from_daynr(days);
-    seconds %= 86400;
-    if (seconds == 0) {
-        _type = TIME_DATE;
-        return true;
+bool DateTimeValue::unix_timestamp(int64_t* timestamp, const cctz::time_zone& ctz) const{
+    const auto tp =
+            cctz::convert(cctz::civil_second(_year, _month, _day, _hour, _minute, _second), ctz);
+    *timestamp = tp.time_since_epoch().count();
+    return true;
+}
+
+bool DateTimeValue::from_unixtime(int64_t timestamp, const std::string& timezone) {
+    cctz::time_zone ctz;
+    if (!TimezoneUtils::find_cctz_time_zone(timezone, ctz)) {
+        return false;
     }
+    return from_unixtime(timestamp, ctz);
+}
+
+bool DateTimeValue::from_unixtime(int64_t timestamp, const cctz::time_zone& ctz) {
+    static const cctz::time_point<cctz::sys_seconds> epoch =
+            std::chrono::time_point_cast<cctz::sys_seconds>(std::chrono::system_clock::from_time_t(0));
+    cctz::time_point<cctz::sys_seconds> t = epoch + cctz::seconds(timestamp);
+
+    const auto tp = cctz::convert(t, ctz);
+
+    _neg = 0;
     _type = TIME_DATETIME;
-    _hour = seconds / 3600;
-    seconds %= 3600;
-    _minute = seconds / 60;
-    _second = seconds % 60;
+    _year = tp.year();
+    _month = tp.month();
+    _day = tp.day();
+    _hour = tp.hour();
+    _minute = tp.minute();
+    _second = tp.second();
+    _microsecond = 0;
+    
     return true;
 }
 
@@ -1579,7 +1603,7 @@ const char* DateTimeValue::day_name() const {
 
 DateTimeValue DateTimeValue::local_time() {
     DateTimeValue value;
-    value.from_unixtime(time(NULL));
+    value.from_unixtime(time(NULL), TimezoneUtils::default_time_zone);
     return value;
 }
 

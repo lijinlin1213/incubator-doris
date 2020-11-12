@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -29,7 +26,7 @@
 #include "common/object_pool.h"
 #include "runtime/exec_env.h"
 #include "runtime/mem_tracker.h"
-#include "util/debug_util.h"
+#include "util/uid_util.h"
 #include "util/pretty_printer.h"
 
 #include "common/names.h"
@@ -37,33 +34,30 @@
 using std::numeric_limits;
 
 
-namespace palo {
+namespace doris {
 
 InitialReservations::InitialReservations(ObjectPool* obj_pool,
-    ReservationTracker* query_reservation, MemTracker* query_mem_tracker,
+    ReservationTracker* query_reservation, std::shared_ptr<MemTracker> query_mem_tracker,
     int64_t initial_reservation_total_claims)
-  : initial_reservation_mem_tracker_(obj_pool->add(
-      new MemTracker(-1, "Unclaimed reservations", query_mem_tracker, false))),
+  : initial_reservation_mem_tracker_(MemTracker::CreateTracker(-1, "Unclaimed reservations", query_mem_tracker, false)),
       remaining_initial_reservation_claims_(initial_reservation_total_claims) {
   initial_reservations_.InitChildTracker(nullptr, query_reservation,
-      initial_reservation_mem_tracker_, numeric_limits<int64_t>::max());
+      initial_reservation_mem_tracker_.get(), numeric_limits<int64_t>::max());
 }
 
 Status InitialReservations::Init(
     const TUniqueId& query_id, int64_t query_min_reservation) {
   DCHECK_EQ(0, initial_reservations_.GetReservation()) << "Already inited";
   if (!initial_reservations_.IncreaseReservation(query_min_reservation)) {
-      Status status;
       std::stringstream ss;
-      ss  << "Minimum reservation unavaliable: " << query_min_reservation
+      ss  << "Minimum reservation unavailable: " << query_min_reservation
           << " query id:" << query_id; 
-      status.add_error_msg(TStatusCode::MINIMUM_RESERVATION_UNAVAILABLE, ss.str());
-      return status;
+      return Status::MinimumReservationUnavailable(ss.str());
   }
   VLOG_QUERY << "Successfully claimed initial reservations ("
             << PrettyPrinter::print(query_min_reservation, TUnit::BYTES) << ") for"
             << " query " << print_id(query_id);
-  return Status::OK;
+  return Status::OK();
 }
 
 void InitialReservations::Claim(BufferPool::ClientHandle* dst, int64_t bytes) {
@@ -90,6 +84,7 @@ void InitialReservations::Return(BufferPool::ClientHandle* src, int64_t bytes) {
 
 void InitialReservations::ReleaseResources() {
   initial_reservations_.Close();
-  initial_reservation_mem_tracker_->close();
+  // TODO(HW): Close() is private. make this tracker shared later
+  // initial_reservation_mem_tracker_->Close();
 }
 }

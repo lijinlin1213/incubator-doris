@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_COMMON_UTIL_THRIFT_CLIENT_H
-#define BDG_PALO_BE_SRC_COMMON_UTIL_THRIFT_CLIENT_H
+#ifndef DORIS_BE_SRC_COMMON_UTIL_THRIFT_CLIENT_H
+#define DORIS_BE_SRC_COMMON_UTIL_THRIFT_CLIENT_H
 
 #include <string>
 #include <ostream>
@@ -39,7 +36,7 @@
 #include "util/thrift_server.h"
 #include "gen_cpp/Types_types.h"
 
-namespace palo {
+namespace doris {
 
 template<class InterfaceType> class ThriftClient;
 
@@ -65,7 +62,7 @@ public:
 
     // close the connection with the remote server. May be called
     // repeatedly.
-    Status close();
+    void close();
 
     // Set the connect timeout
     void set_conn_timeout(int ms) {

@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -20,11 +17,23 @@
 
 #include "util/cpu_info.h"
 
-#ifdef __APPLE__
-#include <sys/sysctl.h>
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+/* GCC-compatible compiler, targeting x86/x86-64 */
+#include <x86intrin.h>
+#elif defined(__GNUC__) && defined(__ARM_NEON__)
+/* GCC-compatible compiler, targeting ARM with NEON */
+#include <arm_neon.h>
+#elif defined(__GNUC__) && defined(__IWMMXT__)
+/* GCC-compatible compiler, targeting ARM with WMMX */
+#include <mmintrin.h>
+#elif (defined(__GNUC__) || defined(__xlC__)) && (defined(__VEC__) || defined(__ALTIVEC__))
+/* XLC or GCC-compatible compiler, targeting PowerPC with VMX/VSX */
+#include <altivec.h>
+#elif defined(__GNUC__) && defined(__SPE__)
+/* GCC-compatible compiler, targeting PowerPC with SPE */
+#include <spe.h>
 #endif
 
-#include <mmintrin.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +47,7 @@
 #include <sys/sysinfo.h>
 
 #include "common/config.h"
+#include "common/env_config.h"
 #include "gflags/gflags.h"
 #include "gutil/strings/substitute.h"
 #include "util/pretty_printer.h"
@@ -55,7 +65,7 @@ DEFINE_int32(num_cores, 0, "(Advanced) If > 0, it sets the number of cores avail
     " Impala. Setting it to 0 means Impala will use all available cores on the machine"
     " according to /proc/cpuinfo.");
 
-namespace palo {
+namespace doris {
 // Helper function to warn if a given file does not contain an expected string as its
 // first line. If the file cannot be opened, no error is reported.
 void WarnIfFileNotEqual(
@@ -70,14 +80,14 @@ void WarnIfFileNotEqual(
 }
 } // end anonymous namespace
 
-namespace palo {
+namespace doris {
 
 bool CpuInfo::initialized_ = false;
 int64_t CpuInfo::hardware_flags_ = 0;
 int64_t CpuInfo::original_hardware_flags_;
 int64_t CpuInfo::cycles_per_ms_;
 int CpuInfo::num_cores_ = 1;
-int CpuInfo::max_num_cores_;
+int CpuInfo::max_num_cores_ = 1;
 string CpuInfo::model_name_ = "unknown";
 int CpuInfo::max_num_numa_nodes_;
 unique_ptr<int[]> CpuInfo::core_to_numa_node_;
@@ -99,7 +109,7 @@ static struct {
 static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 
 // Helper function to parse for hardware flags.
-// values contains a list of space-seperated flags.  check to see if the flags we
+// values contains a list of space-separated flags.  check to see if the flags we
 // care about are present.
 // Returns a bitmap of flags.
 int64_t ParseCPUFlags(const string& values) {
@@ -113,6 +123,7 @@ int64_t ParseCPUFlags(const string& values) {
 }
 
 void CpuInfo::init() {
+    if (initialized_) return;
   string line;
   string name;
   string value;
@@ -159,13 +170,13 @@ void CpuInfo::init() {
   } else {
     num_cores_ = 1;
   }
-  if (config::flags_num_cores > 0) num_cores_ = config::flags_num_cores;
+  if (config::num_cores > 0) num_cores_ = config::num_cores;
   max_num_cores_ = get_nprocs_conf();
 
   // Print a warning if something is wrong with sched_getcpu().
 #ifdef HAVE_SCHED_GETCPU
   if (sched_getcpu() == -1) {
-    LOG(WARNING) << "Kernel does not support getcpu(). Performance may be impacted.";
+    LOG(WARNING) << "Kernel does not support sched_getcpu(). Performance may be impacted.";
   }
 #else
   LOG(WARNING) << "Built on a system without sched_getcpu() support. Performance may"
@@ -287,15 +298,21 @@ void CpuInfo::enable_feature(long flag, bool enable) {
 }
 
 int CpuInfo::get_current_core() {
-  // sched_getcpu() is not supported on some old kernels/glibcs (like the versions that
-  // shipped with CentOS 5). In that case just pretend we're always running on CPU 0
-  // so that we can build and run with degraded perf.
+    // sched_getcpu() is not supported on some old kernels/glibcs (like the versions that
+    // shipped with CentOS 5). In that case just pretend we're always running on CPU 0
+    // so that we can build and run with degraded perf.
 #ifdef HAVE_SCHED_GETCPU
-  int cpu = sched_getcpu();
-  // The syscall may not be supported even if the function exists.
-  return cpu == -1 ? 0 : cpu;
+    int cpu = sched_getcpu();
+    if (cpu < 0) return 0;
+    if (cpu >= max_num_cores_) {
+        LOG_FIRST_N(WARNING, 5) << "sched_getcpu() return value " << cpu
+            << ", which is greater than get_nprocs_conf() retrun value " << max_num_cores_
+            << ", now is " << get_nprocs_conf();
+        cpu %= max_num_cores_;
+    }
+    return cpu;
 #else
-  return 0;
+    return 0;
 #endif
 }
 

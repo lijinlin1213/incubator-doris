@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_COMMON_UTIL_RUNTIME_PROFILE_H
-#define BDG_PALO_BE_SRC_COMMON_UTIL_RUNTIME_PROFILE_H
+#ifndef DORIS_BE_SRC_COMMON_UTIL_RUNTIME_PROFILE_H
+#define DORIS_BE_SRC_COMMON_UTIL_RUNTIME_PROFILE_H
 
 #include <boost/function.hpp>
 #include <boost/scoped_ptr.hpp>
@@ -34,7 +31,7 @@
 #include "util/stopwatch.hpp"
 #include "gen_cpp/RuntimeProfile_types.h"
 
-namespace palo {
+namespace doris {
 
 // Define macros for updating counters.  The macros make it very easy to disable
 // all counters at compile time.  Set this to 0 to remove counters.  This is useful
@@ -52,6 +49,8 @@ namespace palo {
       (profile)->add_counter(name, TUnit::TIME_NS, parent)
 #define SCOPED_TIMER(c) \
       ScopedTimer<MonotonicStopWatch> MACRO_CONCAT(SCOPED_TIMER, __COUNTER__)(c)
+#define CANCEL_SAFE_SCOPED_TIMER(c, is_cancelled) \
+      ScopedTimer<MonotonicStopWatch> MACRO_CONCAT(SCOPED_TIMER, __COUNTER__)(c, is_cancelled)
 #define SCOPED_RAW_TIMER(c) \
       ScopedRawTimer<MonotonicStopWatch> MACRO_CONCAT(SCOPED_RAW_TIMER, __COUNTER__)(c)
 #define COUNTER_UPDATE(c, v) (c)->update(v)
@@ -108,8 +107,6 @@ public:
         virtual void set(int64_t value) {
             _value.store(value);
         }
-
-        virtual void set(int value) { _value.store(value); }
 
         virtual void set(double value) {
             DCHECK_EQ(sizeof(value), sizeof(int64_t));
@@ -280,16 +277,10 @@ public:
         MonotonicStopWatch _sw;
     };
 
-    // Create a runtime profile object with 'name'.  Counters and merged profile are
-    // allocated from pool.
-    RuntimeProfile(ObjectPool* pool, const std::string& name, bool is_averaged_profile = false);
+    // Create a runtime profile object with 'name'.
+    RuntimeProfile(const std::string& name, bool is_averaged_profile = false);
 
     ~RuntimeProfile();
-
-    // Deserialize from thrift.  Runtime profiles are allocated from the pool.
-    static RuntimeProfile* create_from_thrift(
-            ObjectPool* pool,
-            const TRuntimeProfileTree& profiles);
 
     // Adds a child profile.  This is thread safe.
     // 'indent' indicates whether the child will be printed w/ extra indentation
@@ -463,6 +454,11 @@ public:
     HighWaterMarkCounter* AddHighWaterMarkCounter(const std::string& name,
             TUnit::type unit, const std::string& parent_counter_name = "");
 
+    // Only for create MemTracker(using profile's counter to calc consumption)
+    std::shared_ptr<HighWaterMarkCounter> AddSharedHighWaterMarkCounter(
+        const std::string& name, TUnit::type unit,
+        const std::string& parent_counter_name = "");
+
     // stops updating the value of 'rate_counter'. Rate counters are updated
     // periodically so should be removed as soon as the underlying counter is
     // no longer going to change.
@@ -489,6 +485,9 @@ private:
     // object, but occasionally allocated in the constructor.
     std::unique_ptr<ObjectPool> _pool;
 
+    // Pool for allocated counters. These counters are shared with some other objects.
+    std::map<std::string, std::shared_ptr<HighWaterMarkCounter>> _shared_counter_pool;
+
     // True if we have to delete the _pool on destruction.
     bool _own_pool;
 
@@ -509,7 +508,7 @@ private:
 
     // Map from parent counter name to a set of child counter name.
     // All top level counters are the child of "" (root).
-    typedef std::map<std::string, std::set<std::string> > ChildCounterMap;
+    typedef std::map<std::string, std::set<std::string>> ChildCounterMap;
     ChildCounterMap _child_counter_map;
 
     // A set of bucket counters registered in this runtime profile.
@@ -524,7 +523,7 @@ private:
     typedef std::map<std::string, RuntimeProfile*> ChildMap;
     ChildMap _child_map;
     // vector of (profile, indentation flag)
-    typedef std::vector<std::pair<RuntimeProfile*, bool> > ChildVector;
+    typedef std::vector<std::pair<RuntimeProfile*, bool>> ChildVector;
     ChildVector _children;
     mutable boost::mutex _children_lock;  // protects _child_map and _children
 
@@ -606,13 +605,6 @@ private:
     // for updating them.
     static PeriodicCounterUpdateState _s_periodic_counter_update_state;
 
-    // Create a subtree of runtime profiles from nodes, starting at *node_idx.
-    // On return, *node_idx is the index one past the end of this subtree
-    static RuntimeProfile* create_from_thrift(
-            ObjectPool* pool,
-            const std::vector<TRuntimeProfileNode>& nodes,
-            int* node_idx);
-
     // update a subtree of profiles from nodes, rooted at *idx.
     // On return, *idx points to the node immediately following this subtree.
     void update(const std::vector<TRuntimeProfileNode>& nodes, int* idx);
@@ -677,12 +669,11 @@ private:
 template<class T>
 class ScopedTimer {
 public:
-    ScopedTimer(RuntimeProfile::Counter* counter) :
-        _counter(counter) {
+    ScopedTimer(RuntimeProfile::Counter* counter, const bool* is_cancelled = nullptr) :
+        _counter(counter), _is_cancelled(is_cancelled) {
         if (counter == NULL) {
             return;
         }
-
         DCHECK(counter->type() == TUnit::TIME_NS);
         _sw.start();
     }
@@ -695,8 +686,12 @@ public:
         _sw.start();
     }
 
+    bool is_cancelled() {
+        return _is_cancelled != nullptr && *_is_cancelled;
+    }
+
     void UpdateCounter() {
-        if (_counter != NULL) {
+        if (_counter != NULL && !is_cancelled()) {
             _counter->update(_sw.elapsed_time());
         }
     }
@@ -714,6 +709,7 @@ private:
 
     T _sw;
     RuntimeProfile::Counter* _counter;
+    const bool* _is_cancelled;
 };
 
 // Utility class to update time elapsed when the object goes out of scope.

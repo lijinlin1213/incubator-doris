@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,18 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_NEW_EXPRS_AGG_FN_H
-#define BDG_PALO_BE_SRC_QUERY_NEW_EXPRS_AGG_FN_H
+#ifndef DORIS_BE_SRC_QUERY_NEW_EXPRS_AGG_FN_H
+#define DORIS_BE_SRC_QUERY_NEW_EXPRS_AGG_FN_H
 
 #include "exprs/expr.h"
 #include "runtime/descriptors.h"
 #include "udf/udf.h"
 
-namespace palo {
+namespace doris {
 
-using palo_udf::FunctionContext;
+using doris_udf::FunctionContext;
 
-class LlvmCodeGen;
 class MemPool;
 class MemTracker;
 class ObjectPool;
@@ -59,7 +55,7 @@ class TExprNode;
 /// update_fn_   : An update function that processes the arguments for each row in the
 ///                query result set and accumulates an intermediate result. For example,
 ///                this function might increment a counter, append to a string buffer or
-///                add the input to a culmulative sum.
+///                add the input to a cumulative sum.
 ///
 /// merge_fn_    : A merge function that combines multiple intermediate results into a
 ///                single value.
@@ -131,17 +127,6 @@ class AggFn : public Expr {
     return arg_type_descs_;
   }
 
-  /// Generates an IR wrapper function to call update_fn_/merge_fn_ which may either be
-  /// cross-compiled or loaded from an external library. The generated IR function is
-  /// returned in 'uda_fn'. Returns error status on failure.
-  /// TODO: implement codegen path for init, finalize, serialize functions etc.
-  Status CodegenUpdateOrMergeFunction(LlvmCodeGen* codegen, llvm::Function** uda_fn)
-      WARN_UNUSED_RESULT;
-
-  Status get_codegend_compute_fn(RuntimeState* state, llvm::Function** fn) {
-      return Status::OK;
-  }
-
   /// Releases all cache entries to libCache for all nodes in the expr tree.
   virtual void Close();
   static void Close(const std::vector<AggFn*>& exprs);
@@ -153,6 +138,10 @@ class AggFn : public Expr {
   virtual std::string DebugString() const;
   static std::string DebugString(const std::vector<AggFn*>& exprs);
  
+  const int get_vararg_start_idx() const {
+      return _vararg_start_idx;
+  }
+
 private:
   friend class Expr;
   friend class NewAggFnEvaluator;
@@ -181,6 +170,8 @@ private:
   void* serialize_fn_ = nullptr;
   void* get_value_fn_ = nullptr;
   void* finalize_fn_ = nullptr;
+  
+  int _vararg_start_idx;
 
   AggFn(const TExprNode& node, const SlotDescriptor& intermediate_slot_desc,
       const SlotDescriptor& output_slot_desc);

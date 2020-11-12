@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -19,18 +21,24 @@
 
 #include "gen_cpp/PaloBrokerService_types.h"
 #include "gen_cpp/TPaloBrokerService.h"
+#include "gen_cpp/FrontendService.h"
+#include "gen_cpp/FrontendService_types.h"
+#include "gen_cpp/HeartbeatService_types.h"
 
 #include "common/logging.h"
+#include "env/env.h"
 #include "exec/broker_reader.h"
 #include "exec/broker_writer.h"
 #include "olap/file_helper.h"
-#include "olap/olap_engine.h"
-#include "olap/olap_table.h"
+#include "olap/snapshot_manager.h"
+#include "olap/storage_engine.h"
+#include "olap/tablet.h"
 #include "runtime/exec_env.h"
 #include "runtime/broker_mgr.h"
 #include "util/file_utils.h"
+#include "util/thrift_rpc_helper.h"
 
-namespace palo {
+namespace doris {
 
 #ifdef BE_TEST
 inline BrokerServiceClientCache* client_cache(ExecEnv* env) {
@@ -39,7 +47,7 @@ inline BrokerServiceClientCache* client_cache(ExecEnv* env) {
 }
 
 inline const std::string& client_id(ExecEnv* env, const TNetworkAddress& addr) {
-    static std::string s_client_id = "palo_unit_test";
+    static std::string s_client_id = "doris_unit_test";
     return s_client_id;
 }
 #else
@@ -52,8 +60,13 @@ inline const std::string& client_id(ExecEnv* env, const TNetworkAddress& addr) {
 }
 #endif
 
-SnapshotLoader::SnapshotLoader(ExecEnv* env) :
-    _env(env) {
+SnapshotLoader::SnapshotLoader(
+        ExecEnv* env,
+        int64_t job_id,
+        int64_t task_id) :
+    _env(env),
+    _job_id(job_id),
+    _task_id(task_id) {
 
 }
 
@@ -65,14 +78,19 @@ Status SnapshotLoader::upload(
         const std::map<std::string, std::string>& src_to_dest_path,
         const TNetworkAddress& broker_addr,
         const std::map<std::string, std::string>& broker_prop,
-        int64_t job_id,
         std::map<int64_t, std::vector<std::string>>* tablet_files) {
 
     LOG(INFO) << "begin to upload snapshot files. num: "
               << src_to_dest_path.size() << ", broker addr: "
-              << broker_addr << ", job: " << job_id;
+              << broker_addr << ", job: " << _job_id
+              << ", task" << _task_id;
 
-    Status status = Status::OK;
+    // check if job has already been cancelled
+    int tmp_counter = 1;
+    RETURN_IF_ERROR(_report_every(0, &tmp_counter, 0, 0,
+            TTaskType::type::UPLOAD));
+
+    Status status = Status::OK();
     // 1. validate local tablet snapshot paths
     RETURN_IF_ERROR(_check_local_snapshot_paths(src_to_dest_path, true));
 
@@ -84,12 +102,17 @@ Status SnapshotLoader::upload(
             << "broker addr: " << broker_addr
             << ". msg: " << status.get_error_msg();
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
 
     std::vector<TNetworkAddress> broker_addrs;
     broker_addrs.push_back(broker_addr);
     // 3. for each src path, upload it to remote storage
+    // we report to frontend for every 10 files, and we will cancel the job if
+    // the job has already been cancelled in frontend.
+    int report_counter = 0;
+    int total_num = src_to_dest_path.size();
+    int finished_num = 0;
     for (auto iter = src_to_dest_path.begin(); iter != src_to_dest_path.end();
             iter++) {
         const std::string& src_path = iter->first;
@@ -116,6 +139,10 @@ Status SnapshotLoader::upload(
 
         // 2.3 iterate local files
         for (auto it = local_files.begin(); it != local_files.end(); it++) {
+
+            RETURN_IF_ERROR(_report_every(10, &report_counter, finished_num, total_num,
+                TTaskType::type::UPLOAD));
+
             const std::string& local_file = *it;
             // calc md5sum of localfile
             std::string md5sum;
@@ -125,7 +152,7 @@ Status SnapshotLoader::upload(
                 ss << "failed to get md5sum of file: " << local_file 
                     << ": " << status.get_error_msg();
                 LOG(WARNING) << ss.str();
-                return Status(ss.str());
+                return Status::InternalError(ss.str());
             }
             VLOG(2) << "get file checksum: " << local_file << ": " << md5sum;
             local_files_with_checksum.push_back(local_file + "." + md5sum);
@@ -169,12 +196,12 @@ Status SnapshotLoader::upload(
                 FileHandler file_handler;
                 OLAPStatus ost = file_handler.open(full_local_file, O_RDONLY);
                 if (ost != OLAP_SUCCESS) {
-                    return Status("failed to open file: " + full_local_file);
+                    return Status::InternalError("failed to open file: " + full_local_file);
                 }
 
                 size_t file_len = file_handler.length();
                 if (file_len == -1) {
-                    return Status("failed to get length of file: " + full_local_file);
+                    return Status::InternalError("failed to get length of file: " + full_local_file);
                 }
 
                 constexpr size_t buf_sz = 1024 * 1024;
@@ -185,7 +212,7 @@ Status SnapshotLoader::upload(
                     size_t read_len = left_len > buf_sz ? buf_sz : left_len;
                     ost = file_handler.pread(read_buf, read_len, read_offset);
                     if (ost != OLAP_SUCCESS) {
-                        return Status("failed to read file: " + full_local_file);
+                        return Status::InternalError("failed to read file: " + full_local_file);
                     }
                     // write through broker
                     size_t write_len = 0;
@@ -196,6 +223,10 @@ Status SnapshotLoader::upload(
                     read_offset += read_len;
                     left_len -= read_len;
                 }
+
+                // close manually, because we need to check its close status
+                RETURN_IF_ERROR(broker_writer->close());
+
                 LOG(INFO) << "finished to write file via broker. file: " <<
                     full_local_file << ", length: " << file_len;
             }
@@ -208,11 +239,13 @@ Status SnapshotLoader::upload(
         } // end for each tablet's local files
 
         tablet_files->emplace(tablet_id, local_files_with_checksum);
+        finished_num++;
         LOG(INFO) << "finished to write tablet to remote. local path: "
                 << src_path << ", remote path: " << dest_path;
     } // end for each tablet path
 
-    LOG(INFO) << "finished to upload snapshots. job: " << job_id;
+    LOG(INFO) << "finished to upload snapshots. job: " << _job_id
+            << ", task id: " << _task_id;
     return status;
 }
 
@@ -225,14 +258,19 @@ Status SnapshotLoader::download(
         const std::map<std::string, std::string>& src_to_dest_path,
         const TNetworkAddress& broker_addr,
         const std::map<std::string, std::string>& broker_prop,
-        int64_t job_id,
         std::vector<int64_t>* downloaded_tablet_ids) {
 
     LOG(INFO) << "begin to download snapshot files. num: "
               << src_to_dest_path.size() << ", broker addr: "
-              << broker_addr << ", job: " << job_id;
+              << broker_addr << ", job: " << _job_id
+              << ", task id: " << _task_id;
 
-    Status status = Status::OK;
+    // check if job has already been cancelled
+    int tmp_counter = 1;
+    RETURN_IF_ERROR(_report_every(0, &tmp_counter, 0, 0,
+            TTaskType::type::DOWNLOAD));
+
+    Status status = Status::OK();
     // 1. validate local tablet snapshot paths
     RETURN_IF_ERROR(_check_local_snapshot_paths(src_to_dest_path, false));
 
@@ -244,12 +282,15 @@ Status SnapshotLoader::download(
             << "broker addr: " << broker_addr
             << ". msg: " << status.get_error_msg();
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
 
     std::vector<TNetworkAddress> broker_addrs;
     broker_addrs.push_back(broker_addr);
     // 3. for each src path, download it to local storage
+    int report_counter = 0;
+    int total_num = src_to_dest_path.size();
+    int finished_num = 0;
     for (auto iter = src_to_dest_path.begin(); iter != src_to_dest_path.end();
             iter++) {
         const std::string& remote_path = iter->first;
@@ -279,10 +320,23 @@ Status SnapshotLoader::download(
             std::stringstream ss;
             ss << "get nothing from remote path: " << remote_path;
             LOG(WARNING) << ss.str();
-            return Status(ss.str());
+            return Status::InternalError(ss.str());
         }
 
+        TabletSharedPtr tablet = _env->storage_engine()->tablet_manager()->get_tablet(local_tablet_id, schema_hash);
+        if (tablet == nullptr) {
+            std::stringstream ss;
+            ss << "failed to get local tablet: " << local_tablet_id;
+            LOG(WARNING) << ss.str();
+            return Status::InternalError(ss.str());
+        }
+        DataDir* data_dir = tablet->data_dir();
+
         for (auto& iter : remote_files) {
+
+            RETURN_IF_ERROR(_report_every(10, &report_counter, finished_num, total_num,
+                    TTaskType::type::DOWNLOAD));
+
             bool need_download = false;
             const std::string& remote_file = iter.first;
             const FileStat& file_stat = iter.second;
@@ -327,6 +381,12 @@ Status SnapshotLoader::download(
             LOG(INFO) << "begin to download from " << full_remote_file << " to "
                     << full_local_file;
             size_t file_len = file_stat.size;
+
+            // check disk capacity
+            if (data_dir->reach_capacity_limit(file_len)) {
+                return Status::InternalError("capacity limit reached");
+            }
+
             {
                 // 1. open remote file for read
                 std::unique_ptr<BrokerReader> broker_reader;
@@ -351,7 +411,7 @@ Status SnapshotLoader::download(
                 OLAPStatus ost = file_handler.open_with_mode(full_local_file,
                         O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR);
                 if (ost != OLAP_SUCCESS) {
-                    return Status("failed to open file: " + full_local_file);
+                    return Status::InternalError("failed to open file: " + full_local_file);
                 }
 
                 // 4. read remote and write to local
@@ -373,7 +433,7 @@ Status SnapshotLoader::download(
                     if (read_len > 0) {
                         ost = file_handler.pwrite(read_buf, read_len, write_offset);
                         if (ost != OLAP_SUCCESS) {
-                            return Status("failed to write file: " + full_local_file);
+                            return Status::InternalError("failed to write file: " + full_local_file);
                         }
 
                         write_offset += read_len;
@@ -388,7 +448,7 @@ Status SnapshotLoader::download(
                 std::stringstream ss;
                 ss << "failed to get md5sum of file: " << full_local_file;
                 LOG(WARNING) << ss.str();
-                return Status(ss.str());
+                return Status::InternalError(ss.str());
             }
             VLOG(2) << "get downloaded file checksum: " << full_local_file << ": "
                     << downloaded_md5sum;
@@ -397,7 +457,7 @@ Status SnapshotLoader::download(
                 ss << "invalid md5 of downloaded file: " << full_local_file
                    << ", expected: " << file_stat.md5 << ", get: " << downloaded_md5sum;
                 LOG(WARNING) << ss.str();
-                return Status(ss.str());
+                return Status::InternalError(ss.str());
             }
 
             // local_files always keep the updated local files
@@ -432,9 +492,12 @@ Status SnapshotLoader::download(
                         << ", ignore it";
             }
         }
+
+        finished_num++;
     } // end for src_to_dest_path
 
-    LOG(INFO) << "finished to download snapshots. job: " << job_id;
+    LOG(INFO) << "finished to download snapshots. job: " << _job_id
+            << ", task id: " << _task_id;
     return status;
 }
 
@@ -443,16 +506,19 @@ Status SnapshotLoader::download(
 // If overwrite, just replace the tablet_path with snapshot_path,
 // else: (TODO)
 // 
+// MUST hold tablet's header lock, push lock, cumulative lock and base compaction lock
 Status SnapshotLoader::move(
     const std::string& snapshot_path,
-    const std::string& tablet_path,
-    int64_t job_id,
+    TabletSharedPtr tablet,
     bool overwrite) {
-
+    std::string tablet_path = tablet->tablet_path();
+    std::string store_path = tablet->data_dir()->path();
     LOG(INFO) << "begin to move snapshot files. from: "
-              << snapshot_path << ", to: " << tablet_path << ", job: " << job_id;
+              << snapshot_path << ", to: " << tablet_path
+              << ", store: " << store_path << ", job: " << _job_id
+              << ", task id: " << _task_id;
 
-    Status status = Status::OK;
+    Status status = Status::OK();
 
     // validate snapshot_path and tablet_path
     int64_t snapshot_tablet_id = 0;
@@ -471,7 +537,16 @@ Status SnapshotLoader::move(
         ss << "path does not match. snapshot: " << snapshot_path
             << ", tablet path: " << tablet_path;
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
+    }
+
+
+    DataDir* store = StorageEngine::instance()->get_store(store_path);
+    if (store == nullptr) {
+        std::stringstream ss;
+        ss << "failed to get store by path: " << store_path;
+        LOG(WARNING) << ss.str();
+        return Status::InternalError(ss.str());
     }
 
     boost::filesystem::path tablet_dir(tablet_path);
@@ -480,14 +555,25 @@ Status SnapshotLoader::move(
         std::stringstream ss;
         ss << "tablet path does not exist: " << tablet_path;
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
 
     if (!boost::filesystem::exists(snapshot_dir)) {
         std::stringstream ss;
         ss << "snapshot path does not exist: " << snapshot_path;
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
+    }
+
+    // rename the rowset ids and tabletid info in rowset meta
+    OLAPStatus convert_status = SnapshotManager::instance()->convert_rowset_ids(
+        snapshot_path, tablet_id, schema_hash);
+    if (convert_status != OLAP_SUCCESS) {
+        std::stringstream ss;
+        ss << "failed to convert rowsetids in snapshot: " << snapshot_path
+            << ", tablet path: " << tablet_path;
+        LOG(WARNING) << ss.str();
+        return Status::InternalError(ss.str());
     }
 
     if (overwrite) {
@@ -496,7 +582,7 @@ Status SnapshotLoader::move(
 
         // 1. simply delete the old dir and replace it with the snapshot dir
         try {
-            // This remove seems saft enough, because we already get
+            // This remove seems soft enough, because we already get
             // tablet id and schema hash from this path, which
             // means this path is a valid path.
             boost::filesystem::remove_all(tablet_dir);
@@ -508,160 +594,44 @@ Status SnapshotLoader::move(
             ss << "failed to move tablet path: " << tablet_path
                 << ". err: " << e.what();
             LOG(WARNING) << ss.str();
-            return Status(ss.str());
+            return Status::InternalError(ss.str());
         }
 
-        // copy files one by one
+        // link files one by one
+        // files in snapshot dir will be moved in snapshot clean process
+        std::vector<std::string> linked_files;
         for (auto& file : snapshot_files) {
             std::string full_src_path = snapshot_path + "/" + file;
             std::string full_dest_path = tablet_path + "/" + file;
-            RETURN_IF_ERROR(FileUtils::copy_file(full_src_path, full_dest_path));
-            VLOG(2) << "copy file from " << full_src_path<< " to " << full_dest_path;
+            if (link(full_src_path.c_str(), full_dest_path.c_str()) != 0) {
+                LOG(WARNING) << "failed to link file from " << full_src_path
+                        << " to " << full_dest_path << ", err: " << std::strerror(errno);
+
+                // clean the already linked files
+                for (auto& linked_file : linked_files) {
+                    remove(linked_file.c_str());
+                }
+                
+                return Status::InternalError("move tablet failed");
+            }
+            linked_files.push_back(full_dest_path);
+            VLOG(2) << "link file from " << full_src_path << " to " << full_dest_path;
         }
 
     } else {
-        // This is not a overwrite move
-        // The files in tablet dir should be like this:
-        //
-        //  10001.hdr
-        //  10001_0_70_3286516299297662422_0.idx
-        //  10001_0_70_3286516299297662422_0.dat
-        //  10001_71_71_4684061214850851594_0.idx
-        //  10001_71_71_4684061214850851594_0.dat
-        //  ...
-        //
-        //  0-70 version is supposed to be the placeholder version
-        //
-        // The files in snapshot dir should be like this:
-        //  10001.hdr
-        //  10001_0_40_4684061214850851594_0.idx
-        //  10001_0_40_4684061214850851594_0.dat
-        //  10001_41_68_1097018054900466785_0.idx
-        //  10001_41_68_1097018054900466785_0.dat
-        //  10001_69_69_8126494056407230455_0.idx
-        //  10001_69_69_8126494056407230455_0.dat
-        //  10001_70_70_6330898043876688539_0.idx
-        //  10001_70_70_6330898043876688539_0.dat
-        //  10001_71_71_0_0.idx
-        //  10001_71_71_0_0.dat
-        //
-        //  71-71 may be exist as the palceholder version
-        //
-        // We need to move 0-70 version files from snapshot dir to
-        // replace the 0-70 placeholder version in tablet dir.
-        // than we merge the 2 .hdr file before reloading it.
-    
-        // load header in tablet dir to get the base vesion
-        SmartOLAPTable tablet = OLAPEngine::get_instance()->get_table(
-                tablet_id, schema_hash);
-        if (tablet.get() == NULL) {
-            std::stringstream ss;
-            ss << "failed to get tablet: " << tablet_id << ", schema hash: "
-                << schema_hash;
-            LOG(WARNING) << ss.str();
-            return Status(ss.str());
-        }
-        // get base version
-        tablet->obtain_header_rdlock();
-        const FileVersionMessage* base_version = tablet->base_version();
-        tablet->release_header_lock();
-        if (base_version == nullptr) {
-            std::stringstream ss;
-            ss << "failed to get base version of tablet: " << tablet_id;
-            LOG(WARNING) << ss.str();
-            return Status(ss.str());
-        }
-    
-        int32_t end_version = base_version->end_version();
-
-        // load snapshot tablet
-        std::stringstream hdr;
-        hdr << snapshot_path << "/" << tablet_id << ".hdr";
-        std::string snapshot_header_file = hdr.str();
-    
-        OLAPHeader snapshot_header(snapshot_header_file);
-        OLAPStatus ost = snapshot_header.load();
-        if (ost != OLAP_SUCCESS) {
-            LOG(WARNING) << "failed to load snapshot header: " << snapshot_header_file;
-            return Status("failed to load snapshot header: " + snapshot_header_file);
-        }
-
-        LOG(INFO) << "begin to move snapshot files from version 0 to "
-                << end_version << ", tablet id: " << tablet_id;
-
-        // begin to move
-        try {
-            // delete the placeholder version in tablet dir
-            std::string dummy;
-            std::string place_holder_idx;
-            _assemble_file_name("", tablet_path, tablet_id,
-                    0, end_version,
-                    base_version->version_hash(), 0, ".idx",
-                    &dummy, &place_holder_idx);
-            boost::filesystem::remove(place_holder_idx);
-
-            std::string place_holder_dat;
-            _assemble_file_name("", tablet_path, tablet_id,
-                    0, end_version,
-                    base_version->version_hash(), 0, ".dat",
-                    &dummy, &place_holder_idx);
-            boost::filesystem::remove(place_holder_dat);
-
-            // copy files
-            int version_size = snapshot_header.file_version_size();
-            for (int i = 0; i < version_size; ++i) {
-                const FileVersionMessage& version = snapshot_header.file_version(i);
-                if (version.start_version() > end_version) {
-                    continue;
-                }
-                int seg_num = version.num_segments();
-                for (int j = 0; j < seg_num; i++) {
-                    // idx
-                    std::string idx_from;
-                    std::string idx_to;
-                    _assemble_file_name(snapshot_path, tablet_path, tablet_id,
-                            version.start_version(), version.end_version(),
-                            version.version_hash(), j, ".idx",
-                            &idx_from, &idx_to);
-
-                    boost::filesystem::copy_file(idx_from, idx_to);
-
-                    // dat
-                    std::string dat_from;
-                    std::string dat_to;
-                    _assemble_file_name(snapshot_path, tablet_path, tablet_id,
-                            version.start_version(), version.end_version(),
-                            version.version_hash(), j, ".dat",
-                            &dat_from, &dat_to);
-                    boost::filesystem::copy_file(dat_from, dat_to);
-                }
-            }
-        } catch (const boost::filesystem::filesystem_error& e) {
-            std::stringstream ss;
-            ss << "failed to move tablet path: " << tablet_path
-                << ". err: " << e.what();
-            LOG(WARNING) << ss.str();
-            return Status(ss.str());
-        }
-        
-        // merge 2 headers
-        ost = tablet->merge_header(snapshot_header, end_version);
-        if (ost != OLAP_SUCCESS) {
-            std::stringstream ss;
-            ss << "failed to move tablet path: " << tablet_path;
-            LOG(WARNING) << ss.str();
-            return Status(ss.str());
-        }
+        LOG(FATAL) << "only support overwrite now";
     }
 
+    // snapshot loader not need to change tablet uid
+    // fixme: there is no header now and can not call load_one_tablet here
     // reload header
-    OLAPStatus ost = OLAPEngine::get_instance()->load_one_tablet(
-            tablet_id, schema_hash, tablet_path, true);
+    OLAPStatus ost = StorageEngine::instance()->tablet_manager()->load_tablet_from_dir(
+            store, tablet_id, schema_hash, tablet_path, true);
     if (ost != OLAP_SUCCESS) {
         std::stringstream ss;
         ss << "failed to reload header of tablet: " << tablet_id;
         LOG(WARNING) << ss.str();
-        return Status(ss.str());
+        return Status::InternalError(ss.str());
     }
     LOG(INFO) << "finished to reload header of tablet: " << tablet_id;
 
@@ -685,7 +655,7 @@ Status SnapshotLoader::_get_tablet_id_and_schema_hash_from_file_path(
     // we try to extract tablet_id from path
     size_t pos = src_path.find_last_of("/");
     if (pos == std::string::npos || pos == src_path.length() - 1) {
-        return Status("failed to get tablet id from path: " + src_path);
+        return Status::InternalError("failed to get tablet id from path: " + src_path);
     }
 
     std::string schema_hash_str = src_path.substr(pos + 1);
@@ -696,7 +666,7 @@ Status SnapshotLoader::_get_tablet_id_and_schema_hash_from_file_path(
     // skip schema hash part
     size_t pos2 = src_path.find_last_of("/", pos - 1);
     if (pos2 == std::string::npos) {
-        return Status("failed to get tablet id from path: " + src_path);
+        return Status::InternalError("failed to get tablet id from path: " + src_path);
     }
 
     std::string tablet_str = src_path.substr(pos2 + 1, pos - pos2);
@@ -707,7 +677,7 @@ Status SnapshotLoader::_get_tablet_id_and_schema_hash_from_file_path(
     VLOG(2) << "get tablet id " << *tablet_id
             << ", schema hash: " << *schema_hash
             << " from path: " << src_path;
-    return Status::OK;
+    return Status::OK();
 }
 
 Status SnapshotLoader::_check_local_snapshot_paths(
@@ -723,11 +693,11 @@ Status SnapshotLoader::_check_local_snapshot_paths(
             std::stringstream ss;
             ss << "snapshot path is not directory or does not exist: " << path;
             LOG(WARNING) << ss.str();
-            return Status(TStatusCode::RUNTIME_ERROR, ss.str(), true);
+            return Status::RuntimeError(ss.str());
         }
     }
     LOG(INFO) << "all local snapshot paths are existing. num: " << src_to_dest_path.size();
-    return Status::OK;
+    return Status::OK();
 }
 
 Status SnapshotLoader::_get_existing_files_from_remote(
@@ -754,13 +724,13 @@ Status SnapshotLoader::_get_existing_files_from_remote(
 
         if (list_rep.opStatus.statusCode == TBrokerOperationStatusCode::FILE_NOT_FOUND) {
             LOG(INFO) << "path does not exist: " << remote_path;
-            return Status::OK;
+            return Status::OK();
         } else if (list_rep.opStatus.statusCode != TBrokerOperationStatusCode::OK) {
             std::stringstream ss;
             ss << "failed to list files from remote path: " << remote_path << ", msg: "
                << list_rep.opStatus.message;
             LOG(WARNING) << ss.str();
-            return Status(ss.str());
+            return Status::InternalError(ss.str());
         }
         LOG(INFO) << "finished to list files from remote path. file num: "
             << list_rep.files.size();
@@ -792,17 +762,17 @@ Status SnapshotLoader::_get_existing_files_from_remote(
         std::stringstream ss;
         ss << "failed to list files in remote path: " << remote_path << ", msg: " << e.what();
         LOG(WARNING) << ss.str();
-        return Status(TStatusCode::THRIFT_RPC_ERROR, ss.str(), false);
+        return Status::ThriftRpcError(ss.str());
     }
 
-    return Status::OK;
+    return Status::OK();
 }
 
 Status SnapshotLoader::_get_existing_files_from_local(
     const std::string& local_path,
     std::vector<std::string>* local_files) {
 
-    Status status = FileUtils::scan_dir(local_path, local_files);
+    Status status = FileUtils::list_files(Env::Default(), local_path, local_files);
     if (!status.ok()) {
         std::stringstream ss;
         ss << "failed to list files in local path: " << local_path << ", msg: "
@@ -812,7 +782,7 @@ Status SnapshotLoader::_get_existing_files_from_local(
     }
     LOG(INFO) << "finished to list files in local path: " << local_path << ", file num: "
               << local_files->size();
-    return Status::OK;
+    return Status::OK();
 }
 
 Status SnapshotLoader::_rename_remote_file(
@@ -840,20 +810,20 @@ Status SnapshotLoader::_rename_remote_file(
             ss << "Fail to rename file: " << orig_name << " to: " << new_name
                 << " msg:" << op_status.message;
             LOG(WARNING) << ss.str();
-            return Status(ss.str());
+            return Status::InternalError(ss.str());
         }
     } catch (apache::thrift::TException& e) {
         std::stringstream ss;
         ss << "Fail to rename file: " << orig_name << " to: " << new_name
             << " msg:" << e.what();
         LOG(WARNING) << ss.str();
-        return Status(TStatusCode::THRIFT_RPC_ERROR, ss.str(), false);
+        return Status::ThriftRpcError(ss.str());
     }
 
     LOG(INFO) << "finished to rename file. orig: " << orig_name
             << ", new: " << new_name;
 
-    return Status::OK;
+    return Status::OK();
 }
 
 void SnapshotLoader::_assemble_file_name(
@@ -894,21 +864,13 @@ Status SnapshotLoader::_replace_tablet_id(
         std::stringstream ss;
         ss << tablet_id << ".hdr";
         *new_file_name = ss.str();
-        return Status::OK;
+        return Status::OK();
     } else if (_end_with(file_name, ".idx")
             || _end_with(file_name, ".dat")) {
-        size_t pos = file_name.find_first_of("_");
-        if (pos == std::string::npos) {
-            return Status("invalid tablet file name: " + file_name);
-        }
-
-        std::string suffix_part = file_name.substr(pos);
-        std::stringstream ss;
-        ss << tablet_id << suffix_part;
-        *new_file_name = ss.str();
-        return Status::OK;
+        *new_file_name = file_name;
+        return Status::OK();
     } else {
-        return Status("invalid tablet file name: " + file_name);
+        return Status::InternalError("invalid tablet file name: " + file_name);
     }
 }
 
@@ -920,7 +882,7 @@ Status SnapshotLoader::_get_tablet_id_from_remote_path(
     // bos://xxx/../__tbl_10004/__part_10003/__idx_10004/__10005
     size_t pos = remote_path.find_last_of("_");
     if (pos == std::string::npos) {
-        return Status("invalid remove file path: " + remote_path);
+        return Status::InternalError("invalid remove file path: " + remote_path);
     }
 
     std::string tablet_id_str = remote_path.substr(pos + 1);
@@ -928,7 +890,59 @@ Status SnapshotLoader::_get_tablet_id_from_remote_path(
     ss << tablet_id_str;
     ss >> *tablet_id;
 
-    return Status::OK;
+    return Status::OK();
 }
 
-} // end namespace palo
+// only return CANCELLED if FE return that job is cancelled.
+// otherwise, return OK
+Status SnapshotLoader::_report_every(
+        int report_threshold,
+        int* counter,
+        int32_t finished_num,
+        int32_t total_num,
+        TTaskType::type type) {
+
+    ++*counter;
+    if (*counter <= report_threshold) {
+        return Status::OK();
+    }
+
+    LOG(INFO) << "report to frontend. job id: " << _job_id
+            << ", task id: " << _task_id
+            << ", finished num: " << finished_num
+            << ", total num:" << total_num;
+
+    TNetworkAddress master_addr = _env->master_info()->network_address;
+
+    TSnapshotLoaderReportRequest request;
+    request.job_id = _job_id;
+    request.task_id = _task_id;
+    request.task_type = type;
+    request.__set_finished_num(finished_num);
+    request.__set_total_num(total_num);
+    TStatus report_st;
+
+    Status rpcStatus = ThriftRpcHelper::rpc<FrontendServiceClient>(
+        master_addr.hostname, master_addr.port,
+        [&request, &report_st] (FrontendServiceConnection& client) {
+            client->snapshotLoaderReport(report_st, request);
+        }, 10000);
+
+    if (!rpcStatus.ok()) {
+        // rpc failed, ignore
+        return Status::OK();
+    }
+
+    // reset
+    *counter = 0;
+    if (report_st.status_code == TStatusCode::CANCELLED) {
+        LOG(INFO) << "job is cancelled. job id: " << _job_id
+                << ", task id: " << _task_id;
+        return Status::Cancelled("Cancelled");
+    }
+    return Status::OK();
+}
+
+
+
+} // end namespace doris

@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -13,13 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_OLAP_COMPARISON_PREDICATE_H
-#define BDG_PALO_BE_SRC_OLAP_COMPARISON_PREDICATE_H
+#ifndef DORIS_BE_SRC_OLAP_COMPARISON_PREDICATE_H
+#define DORIS_BE_SRC_OLAP_COMPARISON_PREDICATE_H
 
 #include <stdint.h>
 #include "olap/column_predicate.h"
 
-namespace palo {
+namespace doris {
 
 class VectorizedRowBatch;
 
@@ -27,11 +29,12 @@ class VectorizedRowBatch;
     template <class type> \
     class CLASS : public ColumnPredicate { \
     public: \
-        CLASS(int column_id, const type& value); \
+        CLASS(uint32_t column_id, const type& value); \
         virtual ~CLASS() { }  \
         virtual void evaluate(VectorizedRowBatch* batch) const override; \
+        void evaluate(ColumnBlock* block, uint16_t* sel, uint16_t* size) const override; \
+        virtual Status evaluate(const Schema& schema, const std::vector<BitmapIndexIterator*>& iterators, uint32_t num_rows, Roaring* roaring) const override; \
     private: \
-        int32_t _column_id; \
         type _value; \
     }; \
 
@@ -42,6 +45,6 @@ COMPARISON_PRED_CLASS_DEFINE(LessEqualPredicate)
 COMPARISON_PRED_CLASS_DEFINE(GreaterPredicate)
 COMPARISON_PRED_CLASS_DEFINE(GreaterEqualPredicate)
 
-} //namespace palo
+} //namespace doris
 
-#endif //BDG_PALO_BE_SRC_OLAP_COMPARISON_PREDICATE_H
+#endif //DORIS_BE_SRC_OLAP_COMPARISON_PREDICATE_H

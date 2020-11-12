@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -13,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef PALO_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
-#define PALO_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
+#ifndef DORIS_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
+#define DORIS_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
 
 #include <cstddef>
 #include <memory>
@@ -30,7 +32,7 @@
 #include "util/mem_util.hpp"
 #include "olap/row_cursor.h"
 
-namespace palo {
+namespace doris {
 
 class VectorizedRowBatch;
 class RowBlock;
@@ -70,14 +72,12 @@ private:
 
 class VectorizedRowBatch {
 public:
-    VectorizedRowBatch(
-        const std::vector<FieldInfo>& schema,
-        const std::vector<uint32_t>& cols,
-        int capacity);
+    VectorizedRowBatch(const TabletSchema* schema, const std::vector<uint32_t>& cols, int capacity,
+                       const std::shared_ptr<MemTracker>& parent_tracker = nullptr);
 
     ~VectorizedRowBatch() {
-        for (auto& item: _col_map) {
-            delete item.second;
+        for (auto vec: _col_vectors) {
+            delete vec;
         }
         delete[] _selected;
     }
@@ -87,7 +87,7 @@ public:
     }
 
     ColumnVector* column(int column_index) {
-        return _col_map[column_index];
+        return _col_vectors[column_index];
     }
 
     const std::vector<uint32_t>& columns() const { return _cols; }
@@ -137,23 +137,23 @@ public:
     void dump_to_row_block(RowBlock* row_block);
 
 private:
-    const std::vector<FieldInfo>& _schema;
+    const TabletSchema* _schema;
     const std::vector<uint32_t>& _cols;
     const uint16_t _capacity;
     uint16_t _size = 0;
     uint16_t* _selected = nullptr;
-    std::map<ColumnId, ColumnVector*> _col_map;
+    std::vector<ColumnVector*> _col_vectors;
 
     bool _selected_in_use = false;
     uint8_t _block_status;
 
-    std::unique_ptr<MemTracker> _tracker;
+    std::shared_ptr<MemTracker> _tracker;
     std::unique_ptr<MemPool> _mem_pool;
     uint16_t _limit;
 };
 
 }
 
-#endif  // _PALO_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
+#endif  // _DORIS_BE_SRC_RUNTIME_VECTORIZED_ROW_BATCH_H
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_EXEC_BLOCKING_JOIN_NODE_H
-#define BDG_PALO_BE_SRC_QUERY_EXEC_BLOCKING_JOIN_NODE_H
+#ifndef DORIS_BE_SRC_QUERY_EXEC_BLOCKING_JOIN_NODE_H
+#define DORIS_BE_SRC_QUERY_EXEC_BLOCKING_JOIN_NODE_H
 
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread.hpp>
@@ -28,7 +25,7 @@
 #include "exec/exec_node.h"
 #include "gen_cpp/PlanNodes_types.h"
 
-namespace palo {
+namespace doris {
 
 class MemPool;
 class RowBatch;
@@ -59,8 +56,6 @@ public:
     // Subclasses should close any other structures and then call
     // BlockingJoinNode::close().
     virtual Status close(RuntimeState* state);
-
-    static const char* LLVM_CLASS_NAME;
 
 private:
     const std::string _node_name;
@@ -99,7 +94,7 @@ private:
     // A NULL ptr for first_left_child_row indicates the left child eos.
     virtual void init_get_next(TupleRow* first_left_child_row) = 0;
 
-    // We parallelize building the build-side with Open'ing the
+    // We parallelize building the build-side with Opening the
     // left child. If, for example, the left child is another
     // join node, it can start to build its own build-side at the
     // same time.

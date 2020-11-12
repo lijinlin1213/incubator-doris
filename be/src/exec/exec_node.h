@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_EXEC_EXEC_NODE_H
-#define BDG_PALO_BE_SRC_QUERY_EXEC_EXEC_NODE_H
+#ifndef DORIS_BE_SRC_QUERY_EXEC_EXEC_NODE_H
+#define DORIS_BE_SRC_QUERY_EXEC_EXEC_NODE_H
 
 #include <sstream>
 #include <vector>
@@ -32,12 +29,11 @@
 #include "util/runtime_profile.h"
 #include "util/blocking_queue.hpp"
 #include "runtime/bufferpool/buffer_pool.h"
+#include "runtime/query_statistics.h"
+#include "service/backend_options.h"
+#include "util/uid_util.h" // for print_id
 
-namespace llvm {
-class Function;
-}
-
-namespace palo {
+namespace doris {
 
 class Expr;
 class ExprContext;
@@ -117,6 +113,11 @@ public:
     // so should be fast.
     virtual Status reset(RuntimeState* state);
 
+    // This should be called before close() and after get_next(), it is responsible for
+    // collecting statistics sent with row batch, it can't be called when prepare() returns
+    // error.
+    virtual Status collect_query_statistics(QueryStatistics* statistics);
+
     // close() will get called for every exec node, regardless of what else is called and
     // the status of these calls (i.e. prepare() may never have been called, or
     // prepare()/open()/get_next() returned with an error).
@@ -128,14 +129,6 @@ public:
     // close() on the children. To ensure that close() is called on the entire plan tree,
     // each implementation should start out by calling the default implementation.
     virtual Status close(RuntimeState* state);
-
-    llvm::Function* codegen_eval_conjuncts(
-        RuntimeState* state, const std::vector<ExprContext*>& conjunct_ctxs, const char* name);
-
-    llvm::Function* codegen_eval_conjuncts(
-            RuntimeState* state, const std::vector<ExprContext*>& conjunct_ctxs) {
-        return codegen_eval_conjuncts(state, conjunct_ctxs, "EvalConjuncts");
-    }
 
     // Creates exec node tree from list of nodes contained in plan via depth-first
     // traversal. All nodes are placed in pool.
@@ -153,6 +146,12 @@ public:
 
     // Collect all scan node types.
     void collect_scan_nodes(std::vector<ExecNode*>* nodes);
+
+    // When the agg node is the scan node direct parent,
+    // we directly return agg object from scan node to agg node,
+    // and don't serialize the agg object.
+    // This improve is cautious, we ensure the correctness firstly.
+    void try_do_aggregate_serde_improve();
 
     typedef bool (*EvalConjunctsFn)(ExprContext* const* ctxs, int num_ctxs, TupleRow* row);
     // Evaluate exprs over row.  Returns true if all exprs return true.
@@ -206,12 +205,12 @@ public:
         return _memory_used_counter;
     }
 
-    MemTracker* mem_tracker() const {
-        return _mem_tracker.get();
+    std::shared_ptr<MemTracker> mem_tracker() const {
+        return _mem_tracker;
     }
 
-    MemTracker* expr_mem_tracker() const {
-        return _expr_mem_tracker.get();
+    std::shared_ptr<MemTracker> expr_mem_tracker() const {
+        return _expr_mem_tracker;
     }
 
     MemPool* expr_mem_pool() { 
@@ -314,10 +313,10 @@ protected:
     boost::scoped_ptr<RuntimeProfile> _runtime_profile;
    
     /// Account for peak memory used by this node
-    boost::scoped_ptr<MemTracker> _mem_tracker;
+    std::shared_ptr<MemTracker> _mem_tracker;
    
     /// MemTracker used by 'expr_mem_pool_'.
-    boost::scoped_ptr<MemTracker> _expr_mem_tracker;
+    std::shared_ptr<MemTracker> _expr_mem_tracker;
 
     /// MemPool for allocating data structures used by expression evaluators in this node.
     /// Created in Prepare().
@@ -384,17 +383,29 @@ protected:
     /// Nodes may override this to add extra periodic cleanup, e.g. freeing other local
     /// allocations. ExecNodes overriding this function should return
     /// ExecNode::QueryMaintenance().
-    virtual Status QueryMaintenance(RuntimeState* state) WARN_UNUSED_RESULT;
+    virtual Status QueryMaintenance(RuntimeState* state, const std::string& msg) WARN_UNUSED_RESULT;
 
 private:
     bool _is_closed;
 };
 
-#define RETURN_IF_LIMIT_EXCEEDED(state) \
+#define LIMIT_EXCEEDED(tracker, state, msg) \
+    do { \
+        stringstream str; \
+        str << "Memory exceed limit. " << msg << " "; \
+        str << "Backend: " << BackendOptions::get_localhost() << ", "; \
+        str << "fragment: " << print_id(state->fragment_instance_id()) << " "; \
+        str << "Used: " << tracker->consumption() << ", Limit: " << tracker->limit() << ". "; \
+        str << "You can change the limit by session variable exec_mem_limit."; \
+        return Status::MemoryLimitExceeded(str.str()); \
+    } while (false)
+
+#define RETURN_IF_LIMIT_EXCEEDED(state, msg) \
     do { \
         /* if (UNLIKELY(MemTracker::limit_exceeded(*(state)->mem_trackers()))) { */ \
-        if (UNLIKELY(state->instance_mem_tracker()->any_limit_exceeded())) { \
-            return Status::MEM_LIMIT_EXCEEDED; \
+        MemTracker* tracker = state->instance_mem_tracker()->find_limit_exceeded_tracker(); \
+        if (tracker != nullptr) { \
+            LIMIT_EXCEEDED(tracker, state, msg); \
         } \
     } while (false)
 }

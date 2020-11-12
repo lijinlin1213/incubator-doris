@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
-#define BDG_PALO_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
+#ifndef DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
+#define DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
 
 #include "common/object_pool.h"
 
@@ -34,6 +31,7 @@
 #include <sstream>
 #include <vector>
 
+#include "cctz/time_zone.h"
 #include "common/global_types.h"
 #include "util/logging.h"
 #include "runtime/mem_pool.h"
@@ -42,19 +40,17 @@
 #include "gen_cpp/PaloInternalService_types.h"  // for TQueryOptions
 #include "util/runtime_profile.h"
 
-namespace palo {
+namespace doris {
 
 class DescriptorTbl;
 class ObjectPool;
 class Status;
 class ExecEnv;
 class Expr;
-class LlvmCodeGen;
 class DateTimeValue;
 class MemTracker;
 class DataStreamRecvr;
 class ResultBufferMgr;
-class ThreadPool;
 class DiskIoMgrs;
 class TmpFileMgr;
 class BufferedBlockMgr;
@@ -68,17 +64,18 @@ class RowDescriptor;
 // query and shared across all execution nodes of that query.
 class RuntimeState {
 public:
+    // for ut only
     RuntimeState(const TUniqueId& fragment_instance_id,
                  const TQueryOptions& query_options,
-                 const std::string& now, ExecEnv* exec_env);
+                 const TQueryGlobals& query_globals, ExecEnv* exec_env);
 
     RuntimeState(
         const TExecPlanFragmentParams& fragment_params,
         const TQueryOptions& query_options,
-        const std::string& now, ExecEnv* exec_env);
+        const TQueryGlobals& query_globals, ExecEnv* exec_env);
 
     // RuntimeState for executing expr in fe-support.
-    RuntimeState(const std::string& now);
+    RuntimeState(const TQueryGlobals& query_globals);
 
     // Empty d'tor to avoid issues with scoped_ptr.
     ~RuntimeState();
@@ -86,7 +83,7 @@ public:
     // Set per-query state.
     Status init(const TUniqueId& fragment_instance_id,
                 const TQueryOptions& query_options,
-                const std::string& now, ExecEnv* exec_env);
+                const TQueryGlobals& query_globals, ExecEnv* exec_env);
 
     // Set up four-level hierarchy of mem trackers: process, query, fragment instance.
     // The instance tracker is tied to our profile.
@@ -94,6 +91,9 @@ public:
     // will add a fourth level when they are initialized.
     // This function also initializes a user function mem tracker (in the fourth level).
     Status init_mem_trackers(const TUniqueId& query_id);
+
+    // for ut only
+    Status init_instance_mem_tracker();
 
     /// Called from Init() to set up buffer reservations and the file group.
     Status init_buffer_poolstate();
@@ -138,8 +138,14 @@ public:
     int num_scanner_threads() const {
         return _query_options.num_scanner_threads;
     }
-    const DateTimeValue* now() const {
-        return _now.get();
+    int64_t timestamp_ms() const {
+        return _timestamp_ms;
+    }
+    const std::string& timezone() const {
+        return _timezone;
+    }
+    const cctz::time_zone& timezone_obj() const {
+        return _timezone_obj;
     }
     const std::string& user() const {
         return _user;
@@ -156,17 +162,15 @@ public:
     ExecEnv* exec_env() {
         return _exec_env;
     }
-    std::vector<MemTracker*>* mem_trackers() {
-        return &_mem_trackers;
+    const std::vector<std::shared_ptr<MemTracker>>& mem_trackers() {
+        return _mem_trackers;
     }
-    MemTracker* fragment_mem_tracker() {
+   std::shared_ptr<MemTracker> fragment_mem_tracker() {
         return _fragment_mem_tracker;
     }
-    MemTracker* instance_mem_tracker() { {
-        return _instance_mem_tracker.get(); }
-    }
-    MemTracker* query_mem_tracker() { {
-        return _query_mem_tracker.get(); }
+
+    std::shared_ptr<MemTracker> instance_mem_tracker() {
+        return _instance_mem_tracker;
     }
     ThreadResourceMgr::ResourcePool* resource_pool() {
         return _resource_pool;
@@ -183,12 +187,6 @@ public:
         return _root_node_id + 1;
     }
 
-    // Returns true if the codegen object has been created. Note that this may return false
-    // even when codegen is enabled if nothing has been codegen'd.
-    bool codegen_created() const {
-        return _codegen.get() != NULL;
-    }
-
     // Returns runtime state profile
     RuntimeProfile* runtime_profile() {
         return &_profile;
@@ -199,28 +197,12 @@ public:
         return !_query_options.disable_codegen;
     }
 
-    // Returns CodeGen object.  Returns NULL if codegen is disabled.
-    LlvmCodeGen* llvm_codegen() {
-        return _codegen.get();
-    }
-    // Returns CodeGen object.  Returns NULL if the codegen object has not been
-    // created. If codegen is enabled for the query, the codegen object will be
-    // created as part of the RuntimeState's initialization.
-    // Otherwise, it can be created by calling create_codegen().
-    LlvmCodeGen* codegen() {
-        return _codegen.get();
-    }
-
     // Create a codegen object in _codegen. No-op if it has already been called.
     // If codegen is enabled for the query, this is created when the runtime
     // state is created. If codegen is disabled for the query, this is created
     // on first use.
     Status create_codegen();
 
-    BufferedBlockMgr* block_mgr() {
-        DCHECK(_block_mgr.get() != NULL);
-        return _block_mgr.get();
-    }
     BufferedBlockMgr2* block_mgr2() {
         DCHECK(_block_mgr2.get() != NULL);
         return _block_mgr2.get();
@@ -242,10 +224,10 @@ public:
         int buffer_size, RuntimeProfile* profile);
 
     // Sets the fragment memory limit and adds it to _mem_trackers
-    void set_fragment_mem_tracker(MemTracker* limit) {
-        DCHECK(_fragment_mem_tracker == NULL);
-        _fragment_mem_tracker = limit;
-        _mem_trackers.push_back(limit);
+    void set_fragment_mem_tracker(std::shared_ptr<MemTracker> tracker) {
+        DCHECK(_fragment_mem_tracker == nullptr);
+        _fragment_mem_tracker = tracker;
+        _mem_trackers.push_back(tracker);
     }
 
     // Appends error to the _error_log if there is space
@@ -270,12 +252,6 @@ public:
     // _unreported_error_idx to _errors_log.size()
     void get_unreported_errors(std::vector<std::string>* new_errors);
 
-    // Returns _codegen in 'codegen'. If 'initialize' is true, _codegen will be created if
-    // it has not been initialized by a previous call already. If 'initialize' is false,
-    // 'codegen' will be set to NULL if _codegen has not been initialized.
-    Status get_codegen(LlvmCodeGen** codegen, bool initialize);
-    Status get_codegen(LlvmCodeGen** codegen);
-
     bool is_cancelled() const {
         return _is_cancelled;
     }
@@ -296,12 +272,10 @@ public:
     // Sets _process_status with err_msg if no error has been set yet.
     void set_process_status(const std::string& err_msg) {
         boost::lock_guard<boost::mutex> l(_process_status_lock);
-
         if (!_process_status.ok()) {
             return;
         }
-
-        _process_status = Status(err_msg);
+        _process_status = Status::InternalError(err_msg);
     }
 
     void set_process_status(const Status& status) {
@@ -335,7 +309,7 @@ public:
     // Returns a non-OK status if query execution should stop (e.g., the query was cancelled
     // or a mem limit was exceeded). Exec nodes should check this periodically so execution
     // doesn't continue if the query terminates abnormally.
-    Status check_query_state();
+    Status check_query_state(const std::string& msg);
 
     std::vector<std::string>& output_files() {
         return _output_files;
@@ -409,24 +383,54 @@ public:
         return _error_log_file_path;
     }
 
-    // TODO(lingbin): remove this file error method after mysql error exporter is stable.
-    void append_error_msg_to_file(const std::string& line, const std::string& error_msg);
+    // is_summary is true, means we are going to write the summary line
+    void append_error_msg_to_file(const std::string& line, const std::string& error_msg,
+        bool is_summary = false);
 
-    int64_t num_rows_load_success() {
-        return _num_rows_load_success.load();
+    int64_t num_bytes_load_total() {
+        return _num_bytes_load_total.load();
+    }
+
+    int64_t num_rows_load_total() {
+        return _num_rows_load_total.load();
     }
 
     int64_t num_rows_load_filtered() {
         return _num_rows_load_filtered.load();
     }
 
-    void update_num_rows_load_success(int64_t num_rows) {
-        _num_rows_load_success.fetch_add(num_rows);
+    int64_t num_rows_load_unselected() {
+        return _num_rows_load_unselected.load();
+    }
+
+    int64_t num_rows_load_success() {
+        return num_rows_load_total() - num_rows_load_filtered() - num_rows_load_unselected();
+    }
+
+    void update_num_rows_load_total(int64_t num_rows) {
+        _num_rows_load_total.fetch_add(num_rows);
+    }
+
+    void set_num_rows_load_total(int64_t num_rows) {
+        _num_rows_load_total.store(num_rows);
+    }
+
+    void update_num_bytes_load_total(int64_t bytes_load) {
+        _num_bytes_load_total.fetch_add(bytes_load);
+    }
+
+    void set_update_num_bytes_load_total(int64_t bytes_load) {
+        _num_bytes_load_total.store(bytes_load);
     }
 
     void update_num_rows_load_filtered(int64_t num_rows) {
         _num_rows_load_filtered.fetch_add(num_rows);
     }
+
+    void update_num_rows_load_unselected(int64_t num_rows) {
+        _num_rows_load_unselected.fetch_add(num_rows);
+    }
+
     void export_load_error(const std::string& error_msg);
 
     void set_per_fragment_instance_idx(int idx) {
@@ -435,6 +439,14 @@ public:
 
     int per_fragment_instance_idx() const {
         return _per_fragment_instance_idx;
+    }
+
+    void set_num_per_fragment_instances(int num_instances) {
+        _num_per_fragment_instances = num_instances;
+    }
+
+    int num_per_fragment_instances() const {
+        return _num_per_fragment_instances;
     }
 
     ReservationTracker* instance_buffer_reservation() {
@@ -453,6 +465,10 @@ public:
         return _query_options.disable_stream_preaggregations;
     }
 
+    bool enable_spill() const {
+        return _query_options.enable_spilling;
+    }
+
      // the following getters are only valid after Prepare()
     InitialReservations* initial_reservations() const { 
         return _initial_reservations; 
@@ -462,29 +478,25 @@ public:
         return _buffer_reservation; 
     }
 
+    const std::vector<TTabletCommitInfo>& tablet_commit_infos() const {
+        return _tablet_commit_infos;
+    }
+
+    std::vector<TTabletCommitInfo>& tablet_commit_infos() {
+        return _tablet_commit_infos;
+    }
+
     /// Helper to call QueryState::StartSpilling().
     Status StartSpilling(MemTracker* mem_tracker);
 
-    void set_query_state_for_wait() {
-        _is_running = false;
-    }
-
-    void set_query_state_for_running() {
-        _is_running = true;
-    }
-
-    bool is_running() {
-        return _is_running;
-    }
+    // get mem limit for load channel
+    // if load mem limit is not set, or is zero, using query mem limit instead.
+    int64_t get_load_mem_limit();
 
 private:
     // Allow TestEnv to set block_mgr manually for testing.
     friend class TestEnv;
 
-    // Use a custom block manager for the query for testing purposes.
-    void set_block_mgr(const boost::shared_ptr<BufferedBlockMgr>& block_mgr) {
-        _block_mgr = block_mgr;
-    }
     // Use a custom block manager for the query for testing purposes.
     void set_block_mgr2(const boost::shared_ptr<BufferedBlockMgr2>& block_mgr) {
         _block_mgr2 = block_mgr;
@@ -493,6 +505,23 @@ private:
     Status create_error_log_file();
 
     static const int DEFAULT_BATCH_SIZE = 2048;
+
+    // all mem limits that apply to this query
+    std::vector<std::shared_ptr<MemTracker>> _mem_trackers;
+
+    // Fragment memory limit.  Also contained in _mem_trackers
+    std::shared_ptr<MemTracker> _fragment_mem_tracker;
+
+    // MemTracker that is shared by all fragment instances running on this host.
+    // The query mem tracker must be released after the _instance_mem_tracker.
+    std::shared_ptr<MemTracker> _query_mem_tracker;
+
+    // Memory usage of this fragment instance
+    std::shared_ptr<MemTracker> _instance_mem_tracker;
+
+    // put runtime state before _obj_pool, so that it will be deconstructed after
+    // _obj_pool. Because some of object in _obj_pool will use profile when deconstructing.
+    RuntimeProfile _profile;
 
     DescriptorTbl* _desc_tbl;
     std::shared_ptr<ObjectPool> _obj_pool;
@@ -518,39 +547,26 @@ private:
 
     // Username of user that is executing the query to which this RuntimeState belongs.
     std::string _user;
-    // Query-global timestamp, e.g., for implementing now().
-    // Use pointer to avoid inclusion of timestampvalue.h and avoid clang issues.
-    boost::scoped_ptr<DateTimeValue> _now;
+
+    //Query-global timestamp_ms
+    int64_t _timestamp_ms;
+    std::string _timezone;
+    cctz::time_zone _timezone_obj;
 
     TUniqueId _query_id;
     TUniqueId _fragment_instance_id;
     TQueryOptions _query_options;
-    ExecEnv* _exec_env;
-    boost::scoped_ptr<LlvmCodeGen> _codegen;
+    ExecEnv* _exec_env = nullptr;
 
     // Thread resource management object for this fragment's execution.  The runtime
     // state is responsible for returning this pool to the thread mgr.
     ThreadResourceMgr::ResourcePool* _resource_pool;
 
-    RuntimeProfile _profile;
-
-    // all mem limits that apply to this query
-    std::vector<MemTracker*> _mem_trackers;
-
-    // Fragment memory limit.  Also contained in _mem_trackers
-    MemTracker* _fragment_mem_tracker;
-
-    // MemTracker that is shared by all fragment instances running on this host.
-    // The query mem tracker must be released after the _instance_mem_tracker.
-    boost::shared_ptr<MemTracker> _query_mem_tracker;
-
-    // Memory usage of this fragment instance
-    boost::scoped_ptr<MemTracker> _instance_mem_tracker;
-
     // if true, execution should stop with a CANCELLED status
     bool _is_cancelled;
 
     int _per_fragment_instance_idx;
+    int _num_per_fragment_instances = 0;
 
     // used as send id
     int _be_number;
@@ -565,7 +581,6 @@ private:
     // BufferedBlockMgr object used to allocate and manage blocks of input data in memory
     // with a fixed memory budget.
     // The block mgr is shared by all fragments for this query.
-    boost::shared_ptr<BufferedBlockMgr> _block_mgr;
     boost::shared_ptr<BufferedBlockMgr2> _block_mgr2;
 
     // This is the node id of the root node for this plan fragment. This is used as the
@@ -579,8 +594,12 @@ private:
 
     // put here to collect files??
     std::vector<std::string> _output_files;
-    std::atomic<int64_t> _num_rows_load_success;
-    std::atomic<int64_t> _num_rows_load_filtered;
+    std::atomic<int64_t> _num_rows_load_total;  // total rows read from source
+    std::atomic<int64_t> _num_rows_load_filtered;   // unqualified rows
+    std::atomic<int64_t> _num_rows_load_unselected; // rows filtered by predicates
+    std::atomic<int64_t> _num_print_error_rows;
+
+    std::atomic<int64_t> _num_bytes_load_total;  // total bytes read from source
 
     std::vector<std::string> _export_output_files;
 
@@ -594,11 +613,9 @@ private:
     int64_t _normal_row_number;
     int64_t _error_row_number;
     std::string _error_log_file_path;
-    std::ofstream* _error_log_file; // error file path, absolute path
+    std::ofstream* _error_log_file = nullptr; // error file path, absolute path
     std::unique_ptr<LoadErrorHub> _error_hub;
-
-    // state of execution
-    volatile bool _is_running;
+    std::vector<TTabletCommitInfo> _tablet_commit_infos;
 
     //TODO chenhao , remove this to QueryState 
     /// Pool of buffer reservations used to distribute initial reservations to operators
@@ -626,9 +643,9 @@ private:
 
 #define RETURN_IF_CANCELLED(state) \
   do { \
-    if (UNLIKELY((state)->is_cancelled())) return Status::CANCELLED; \
+    if (UNLIKELY((state)->is_cancelled())) return Status::Cancelled("Cancelled"); \
   } while (false)
 
 }
 
-#endif // end of BDG_PALO_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
+#endif // end of DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H

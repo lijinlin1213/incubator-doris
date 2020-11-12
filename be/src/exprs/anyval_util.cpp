@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,19 +21,20 @@
 #include "runtime/mem_pool.h"
 #include "runtime/mem_tracker.h"
 
-namespace palo {
-using palo_udf::BooleanVal;
-using palo_udf::TinyIntVal;
-using palo_udf::SmallIntVal;
-using palo_udf::IntVal;
-using palo_udf::BigIntVal;
-using palo_udf::LargeIntVal;
-using palo_udf::FloatVal;
-using palo_udf::DoubleVal;
-using palo_udf::DecimalVal;
-using palo_udf::DateTimeVal;
-using palo_udf::StringVal;
-using palo_udf::AnyVal;
+namespace doris {
+using doris_udf::BooleanVal;
+using doris_udf::TinyIntVal;
+using doris_udf::SmallIntVal;
+using doris_udf::IntVal;
+using doris_udf::BigIntVal;
+using doris_udf::LargeIntVal;
+using doris_udf::FloatVal;
+using doris_udf::DoubleVal;
+using doris_udf::DecimalVal;
+using doris_udf::DecimalV2Val;
+using doris_udf::DateTimeVal;
+using doris_udf::StringVal;
+using doris_udf::AnyVal;
 
 Status allocate_any_val(RuntimeState* state, MemPool* pool, const TypeDescriptor& type,
     const std::string& mem_limit_exceeded_msg, AnyVal** result) {
@@ -49,7 +47,7 @@ Status allocate_any_val(RuntimeState* state, MemPool* pool, const TypeDescriptor
         state, mem_limit_exceeded_msg, anyval_size);
   }
   memset(*result, 0, anyval_size);
-  return Status::OK;
+  return Status::OK();
 }
 
 AnyVal* create_any_val(ObjectPool* pool, const TypeDescriptor& type) {
@@ -78,22 +76,28 @@ AnyVal* create_any_val(ObjectPool* pool, const TypeDescriptor& type) {
     case TYPE_FLOAT:
         return pool->add(new FloatVal);
 
+    case TYPE_TIME:
     case TYPE_DOUBLE:
         return pool->add(new DoubleVal);
 
+    case TYPE_CHAR:
     case TYPE_HLL:
     case TYPE_VARCHAR:
+    case TYPE_OBJECT:
         return pool->add(new StringVal);
 
     case TYPE_DECIMAL:
         return pool->add(new DecimalVal);
+
+    case TYPE_DECIMALV2:
+        return pool->add(new DecimalV2Val);
 
     case TYPE_DATE:
         return pool->add(new DateTimeVal);
 
     case TYPE_DATETIME:
         return pool->add(new DateTimeVal);
-default:
+    default:
         DCHECK(false) << "Unsupported type: " << type.type;
         return NULL;
     }
@@ -123,6 +127,7 @@ FunctionContext::TypeDesc AnyValUtil::column_type_to_type_desc(const TypeDescrip
     case TYPE_FLOAT:
         out.type = FunctionContext::TYPE_FLOAT;
         break;
+    case TYPE_TIME:
     case TYPE_DOUBLE:
         out.type = FunctionContext::TYPE_DOUBLE;
         break;
@@ -139,13 +144,20 @@ FunctionContext::TypeDesc AnyValUtil::column_type_to_type_desc(const TypeDescrip
     case TYPE_HLL:
         out.type = FunctionContext::TYPE_HLL;
         out.len = type.len;
-        break; 
+        break;
+    case TYPE_OBJECT:
+        out.type = FunctionContext::TYPE_OBJECT;
     case TYPE_CHAR:
-        out.type = FunctionContext::TYPE_FIXED_BUFFER;
+        out.type = FunctionContext::TYPE_CHAR;
         out.len = type.len;
         break;
     case TYPE_DECIMAL:
         out.type = FunctionContext::TYPE_DECIMAL;
+        // out.precision = type.precision;
+        // out.scale = type.scale;
+        break;
+    case TYPE_DECIMALV2:
+        out.type = FunctionContext::TYPE_DECIMALV2;
         // out.precision = type.precision;
         // out.scale = type.scale;
         break;

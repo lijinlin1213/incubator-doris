@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -20,14 +22,19 @@
 
 #include "boost/lexical_cast.hpp"
 
+#include "common/logging.h"
 #include "agent/cgroups_mgr.h"
 #include "http/http_channel.h"
 #include "http/http_headers.h"
 #include "http/http_request.h"
 #include "http/http_response.h"
 #include "http/http_status.h"
+#include "olap/olap_define.h"
+#include "olap/storage_engine.h"
+#include "olap/task/engine_checksum_task.h"
+#include "runtime/exec_env.h"
 
-namespace palo {
+namespace doris {
 
 const std::string TABLET_ID = "tablet_id";
 // do not use name "VERSION",
@@ -38,7 +45,6 @@ const std::string SCHEMA_HASH = "schema_hash";
 
 ChecksumAction::ChecksumAction(ExecEnv* exec_env) :
         _exec_env(exec_env) {
-    _command_executor = new CommandExecutor();
 }
 
 void ChecksumAction::handle(HttpRequest *req) {
@@ -120,11 +126,11 @@ void ChecksumAction::handle(HttpRequest *req) {
 int64_t ChecksumAction::do_checksum(int64_t tablet_id, int64_t version, int64_t version_hash,
         int32_t schema_hash, HttpRequest *req) {
 
-    OLAPStatus res = OLAPStatus::OLAP_SUCCESS;
+    OLAPStatus res = OLAP_SUCCESS;
     uint32_t checksum;
-    res = _command_executor->compute_checksum(
-            tablet_id, schema_hash, version, version_hash, &checksum);
-    if (res != OLAPStatus::OLAP_SUCCESS) {
+    EngineChecksumTask engine_task(tablet_id, schema_hash, version, version_hash, &checksum);
+    res = engine_task.execute();
+    if (res != OLAP_SUCCESS) {
         LOG(WARNING) << "checksum failed. status: " << res
                      << ", signature: " << tablet_id;
         return -1L;
@@ -136,10 +142,4 @@ int64_t ChecksumAction::do_checksum(int64_t tablet_id, int64_t version, int64_t 
     return static_cast<int64_t>(checksum);
 } 
 
-ChecksumAction::~ChecksumAction() {
-    if (_command_executor != NULL) {
-        delete _command_executor;
-    }
-}
-
-} // end namespace palo
+} // end namespace doris

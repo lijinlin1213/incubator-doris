@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -13,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H
-#define BDG_PALO_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H
+#ifndef DORIS_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H
+#define DORIS_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H
 
 #include <cctype>
 #include <climits>
@@ -31,7 +33,7 @@
 #include "gutil/strings/numbers.h"
 #include "util/mysql_global.h"
 
-namespace palo {
+namespace doris {
 
 // The number of digits per "big digits"
 static const int32_t DIG_PER_DEC1 = 9;
@@ -314,6 +316,10 @@ public:
     // to              - decimal where where the result will be stored
     //                  to->buf and to->len must be set.
     void to_max_decimal(int precision, int frac);
+    void to_min_decimal(int precision, int frac) {
+        to_max_decimal(precision, frac);
+        _sign = -1;
+    }
 
     // The maximum of fraction part is "scale".
     // If the length of fraction part is less than "scale", '0' will be filled.
@@ -325,7 +331,7 @@ public:
     // @param from - value to convert. Doesn't have to be \0 terminated!
     //               will stop at the fist non-digit char(nor '.' 'e' 'E'),
     //               or reaches the length
-    // @param length - maximum lengnth
+    // @param length - maximum length
     // @return error number.
     //
     // E_DEC_OK/E_DEC_TRUNCATED/E_DEC_OVERFLOW/E_DEC_BAD_NUM/E_DEC_OOM
@@ -371,7 +377,7 @@ public:
         return value;
     }
 
-    static DecimalValue from_decimal_val(const palo_udf::DecimalVal& val) {
+    static DecimalValue from_decimal_val(const doris_udf::DecimalVal& val) {
         DecimalValue result;
         result._int_length = val.int_len;
         result._frac_length = val.frac_len;
@@ -382,7 +388,7 @@ public:
         return result;
     }
 
-    void to_decimal_val(palo_udf::DecimalVal* value) const {
+    void to_decimal_val(doris_udf::DecimalVal* value) const {
         value->int_len = _int_length;
         value->frac_len = _frac_length;
         value->sign = _sign;
@@ -438,9 +444,6 @@ public:
     }
 
     int round(DecimalValue *to, int scale, DecimalRoundMode mode);
-
-    // For C++/IR interop, we need to be able to look up types by name.
-    static const char* _s_llvm_class_name;
 
 private:
 
@@ -590,15 +593,15 @@ inline const int32_t* DecimalValue::get_first_no_zero_index(
 
 std::size_t hash_value(DecimalValue const& value);
 
-} // end namespace palo
+} // end namespace doris
 
 namespace std {
     template<>
-    struct hash<palo::DecimalValue> {
-        size_t operator()(const palo::DecimalValue& v) const {
-            return palo::hash_value(v);
+    struct hash<doris::DecimalValue> {
+        size_t operator()(const doris::DecimalValue& v) const {
+            return doris::hash_value(v);
         }
     };
 }
 
-#endif // BDG_PALO_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H
+#endif // DORIS_BE_SRC_QUERY_RUNTIME_DECIMAL_VALUE_H

@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -17,14 +19,15 @@
 
 #include <algorithm>
 
-#include <boost/algorithm/string.hpp>
+#include "gutil/strings/split.h"
 
+#include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "util/network_util.h"
 #include "util/cidr.h"
 
-namespace palo {
+namespace doris {
 
 static const std::string PRIORITY_CIDR_SEPARATOR = ";";
 
@@ -85,8 +88,8 @@ bool BackendOptions::analyze_priority_cidrs() {
     }
     LOG(INFO) << "priority cidrs in conf: " << config::priority_networks;
 
-    std::vector<std::string> cidr_strs;
-    boost::split(cidr_strs, config::priority_networks, boost::is_any_of(PRIORITY_CIDR_SEPARATOR));
+    std::vector<std::string> cidr_strs = strings::Split(
+            config::priority_networks, PRIORITY_CIDR_SEPARATOR);
 
     for (auto& cidr_str : cidr_strs) {
         CIDR cidr;

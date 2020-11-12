@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,7 +19,7 @@
 #include "exprs/conditional_functions.h"
 #include "udf/udf.h"
 
-namespace palo {
+namespace doris {
 
 #define IF_NULL_COMPUTE_FUNCTION(type, type_name) \
     type IfNullExpr::get_##type_name(ExprContext* context, TupleRow* row) { \
@@ -42,6 +39,7 @@ IF_NULL_COMPUTE_FUNCTION(DoubleVal, double_val);
 IF_NULL_COMPUTE_FUNCTION(StringVal, string_val);
 IF_NULL_COMPUTE_FUNCTION(DateTimeVal, datetime_val);
 IF_NULL_COMPUTE_FUNCTION(DecimalVal, decimal_val);
+IF_NULL_COMPUTE_FUNCTION(DecimalV2Val, decimalv2_val);
 IF_NULL_COMPUTE_FUNCTION(LargeIntVal, large_int_val);
 
 #define NULL_IF_COMPUTE_FUNCTION(TYPE, type_name) \
@@ -94,6 +92,7 @@ IF_COMPUTE_FUNCTION(DoubleVal, double_val);
 IF_COMPUTE_FUNCTION(StringVal, string_val);
 IF_COMPUTE_FUNCTION(DateTimeVal, datetime_val);
 IF_COMPUTE_FUNCTION(DecimalVal, decimal_val);
+IF_COMPUTE_FUNCTION(DecimalV2Val, decimalv2_val);
 IF_COMPUTE_FUNCTION(LargeIntVal, large_int_val);
 
 #define COALESCE_COMPUTE_FUNCTION(type, type_name) \
@@ -116,6 +115,7 @@ COALESCE_COMPUTE_FUNCTION(DoubleVal, double_val);
 COALESCE_COMPUTE_FUNCTION(StringVal, string_val);
 COALESCE_COMPUTE_FUNCTION(DateTimeVal, datetime_val);
 COALESCE_COMPUTE_FUNCTION(DecimalVal, decimal_val);
+COALESCE_COMPUTE_FUNCTION(DecimalV2Val, decimalv2_val);
 COALESCE_COMPUTE_FUNCTION(LargeIntVal, large_int_val);
 
 }

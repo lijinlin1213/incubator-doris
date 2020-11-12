@@ -1,6 +1,3 @@
-// Modifications copyright (C) 2017, Baidu.com, Inc.
-// Copyright 2017 The Apache Software Foundation
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -18,12 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_RUNTIME_BUFFER_POOL_COUNTERS_H
-#define BDG_PALO_BE_RUNTIME_BUFFER_POOL_COUNTERS_H
+#ifndef DORIS_BE_RUNTIME_BUFFER_POOL_COUNTERS_H
+#define DORIS_BE_RUNTIME_BUFFER_POOL_COUNTERS_H
 
 #include "util/runtime_profile.h"
 
-namespace palo {
+namespace doris {
 
 /// A set of counters for each buffer pool client.
 struct BufferPoolClientCounters {
@@ -36,24 +33,6 @@ struct BufferPoolClientCounters {
 
   /// Bytes of buffers allocated via BufferAllocator::AllocateBuffer().
   RuntimeProfile::Counter* cumulative_bytes_alloced;
-
-  /// Amount of time spent waiting for reads from disk to complete.
-  RuntimeProfile::Counter* read_wait_time;
-
-  /// Total number of read I/O operations issued.
-  RuntimeProfile::Counter* read_io_ops;
-
-  /// Total bytes read from disk.
-  RuntimeProfile::Counter* bytes_read;
-
-  /// Amount of time spent waiting for writes to disk to complete.
-  RuntimeProfile::Counter* write_wait_time;
-
-  /// Total number of write I/O operations issued.
-  RuntimeProfile::Counter* write_io_ops;
-
-  /// Total bytes written to disk.
-  RuntimeProfile::Counter* bytes_written;
 
   /// The peak total size of unpinned pages.
   RuntimeProfile::HighWaterMarkCounter* peak_unpinned_bytes;

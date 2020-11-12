@@ -283,7 +283,7 @@ void JoinMapKeysAndValues(const map<string, string>& components,
                           const StringPiece& intra_delim,
                           const StringPiece& inter_delim,
                           string* result);
-void JoinVectorKeysAndValues(const vector< pair<string, string> >& components,
+void JoinVectorKeysAndValues(const vector< pair<string, string>>& components,
                              const StringPiece& intra_delim,
                              const StringPiece& inter_delim,
                              string* result);
@@ -329,7 +329,7 @@ void JoinCSVLineWithDelimiter(const vector<string>& original_cols,
 // JoinElements()
 //    This merges a container of any type supported by StrAppend() with delim
 //    inserted as separators between components.  This is essentially a
-//    templatized version of JoinUsingToBuffer().
+//    templatize version of JoinUsingToBuffer().
 //
 // JoinElementsIterator()
 //    Same as JoinElements(), except that the input elements are specified

@@ -1,8 +1,10 @@
-// Copyright (c) 2017, Baidu.com, Inc. All Rights Reserved
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -13,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BDG_PALO_BE_SRC_QUERY_EXEC_OLAP_SCANNER_H
-#define BDG_PALO_BE_SRC_QUERY_EXEC_OLAP_SCANNER_H
+#ifndef DORIS_BE_SRC_QUERY_EXEC_OLAP_SCANNER_H
+#define DORIS_BE_SRC_QUERY_EXEC_OLAP_SCANNER_H
 
 #include <list>
 #include <vector>
@@ -33,12 +35,12 @@
 #include "runtime/vectorized_row_batch.h"
 
 #include "olap/delete_handler.h"
-#include "olap/i_data.h"
+#include "olap/rowset/column_data.h"
 #include "olap/olap_cond.h"
-#include "olap/olap_engine.h"
+#include "olap/storage_engine.h"
 #include "olap/reader.h"
 
-namespace palo {
+namespace doris {
 
 class OlapScanNode;
 class OLAPReader;
@@ -51,10 +53,17 @@ public:
         RuntimeState* runtime_state,
         OlapScanNode* parent,
         bool aggregation,
-        PaloScanRange* scan_range,
-        const std::vector<OlapScanRange>& key_ranges);
+        bool need_agg_finalize,
+        const TPaloScanRange& scan_range,
+        const std::vector<OlapScanRange*>& key_ranges);
 
     ~OlapScanner();
+
+    Status prepare(
+        const TPaloScanRange& scan_range,
+        const std::vector<OlapScanRange*>& key_ranges,
+        const std::vector<TCondition>& filters,
+        const std::vector<TCondition>& is_nulls);
 
     Status open();
 
@@ -75,25 +84,27 @@ public:
     bool is_open() const { return _is_open; }
     void set_opened() { _is_open = true; }
 
-    int64_t raw_rows_read() const { return _reader->stats().raw_rows_read; }
+    int64_t raw_rows_read() const { return _raw_rows_read; }
 
     void update_counter();
+
+    const std::string& scan_disk() const {
+        return _tablet->data_dir()->path();
+    }
 private:
-    Status _prepare(
-        PaloScanRange* scan_range,
-        const std::vector<OlapScanRange>& key_ranges,
-        const std::vector<TCondition>& filters,
-        const std::vector<TCondition>& is_nulls);
     Status _init_params(
-        const std::vector<OlapScanRange>& key_ranges,
+        const std::vector<OlapScanRange*>& key_ranges,
         const std::vector<TCondition>& filters,
         const std::vector<TCondition>& is_nulls);
     Status _init_return_columns();
     void _convert_row_to_tuple(Tuple* tuple);
 
+    // Update profile that need to be reported in realtime.
+    void _update_realtime_counter();
+
     RuntimeState* _runtime_state;
     OlapScanNode* _parent;
-    const TupleDescriptor* _tuple_desc;      /**< tuple descripter */
+    const TupleDescriptor* _tuple_desc;      /**< tuple descriptor */
     RuntimeProfile* _profile;
     const std::vector<SlotDescriptor*>& _string_slots;
 
@@ -102,9 +113,9 @@ private:
     int _id;
     bool _is_open;
     bool _aggregation;
+    bool _need_agg_finalize = true;
     bool _has_update_counter = false;
 
-    Status _ctor_status;
     int _tuple_idx = 0;
     int _direct_conjunct_size = 0;
 
@@ -113,23 +124,22 @@ private:
     ReaderParams _params;
     std::unique_ptr<Reader> _reader;
 
-    SmartOLAPTable _olap_table;
+    TabletSharedPtr _tablet;
     int64_t _version;
 
     std::vector<uint32_t> _return_columns;
 
     RowCursor _read_row_cursor;
 
-    std::vector<uint32_t> _request_columns_size;
-
     std::vector<SlotDescriptor*> _query_slots;
-    std::vector<const Field*> _query_fields;
 
     // time costed and row returned statistics
     ExecNode::EvalConjunctsFn _eval_conjuncts_fn = nullptr;
 
     RuntimeProfile::Counter* _rows_read_counter = nullptr;
     int64_t _num_rows_read = 0;
+    int64_t _raw_rows_read = 0;
+    int64_t _compressed_bytes_read = 0;
 
     RuntimeProfile::Counter* _rows_pushed_cond_filtered_counter = nullptr;
     // number rows filtered by pushed condition
@@ -138,6 +148,6 @@ private:
     bool _is_closed = false;
 };
 
-} // namespace palo
+} // namespace doris
 
 #endif
